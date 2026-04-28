@@ -1,24 +1,48 @@
 import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid
+from pathlib import Path
 from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
+_GENERICAGENT_CONFIG_DIR = Path.home() / '.genericagent'
+_GENERICAGENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+_UI_LLM_CONFIG_PATH = _GENERICAGENT_CONFIG_DIR / 'ui_llm_config.json'
+
+
+def _load_ui_llm_config():
+    if not _UI_LLM_CONFIG_PATH.exists():
+        return {}
+    try:
+        with open(_UI_LLM_CONFIG_PATH, encoding='utf-8') as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 def _load_mykeys():
     global _mykey_path
     try:
         import mykey; importlib.reload(mykey); _mykey_path = mykey.__file__
-        return {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
+        loaded = {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
+        loaded.update(_load_ui_llm_config())
+        return loaded
     except ImportError: pass
     _mykey_path = p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mykey.json')
     if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from mykey_template.')
-    with open(p, encoding='utf-8') as f: return json.load(f)
+    with open(p, encoding='utf-8') as f:
+        loaded = json.load(f)
+    if isinstance(loaded, dict):
+        loaded.update(_load_ui_llm_config())
+    return loaded
 
 _mykey_path = _mykey_mtime = None
+_ui_llm_mtime = None
 def reload_mykeys():
-    global _mykey_mtime
+    global _mykey_mtime, _ui_llm_mtime
     mt = os.stat(_mykey_path).st_mtime_ns if _mykey_path else -1
-    if mt == _mykey_mtime: return globals().get('mykeys', {}), False
+    ui_mt = os.stat(_UI_LLM_CONFIG_PATH).st_mtime_ns if _UI_LLM_CONFIG_PATH.exists() else -1
+    if mt == _mykey_mtime and ui_mt == _ui_llm_mtime: return globals().get('mykeys', {}), False
     mk = _load_mykeys(); _mykey_mtime = os.stat(_mykey_path).st_mtime_ns
+    _ui_llm_mtime = ui_mt
     print(f'[Info] Load mykeys from {_mykey_path}')
     globals().update(mykeys=mk)
     if mk.get('langfuse_config'):

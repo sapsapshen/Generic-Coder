@@ -2,9 +2,9 @@
 # minimal core first; missing packages can be installed on demand.
 
 [project]
-name = "genericagent"
+name = "generic-coder"
 version = "0.1.0"
-description = "Minimalist self-evolving autonomous agent framework"
+description = "Generic Coder autonomous development cockpit"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
@@ -16,10 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# select extras, not all. match current task/env.
-# examples: .[ui] for GUI, bot deps only if bot needed.
+web = []
+desktop = [
+    "pywebview>=4.0",
+]
 ui = [
-    "streamlit>=1.28",
     "pywebview>=4.0",
 ]
 all-frontends = [
@@ -31,10 +32,43 @@ all-frontends = [
     "wecom-aibot-sdk>=1.0",
     "dingtalk-stream>=0.20",
 ]
+workspace = [
+    "watchfiles>=0.20",
+]
+remote = [
+    "paramiko>=3.0",
+]
+media = [
+    "Pillow>=10.0",
+    "PyPDF2>=3.0",
+    "pdfplumber>=0.10",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6",
+]
+installer = [
+    "pyinstaller>=6.0",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = []
+py-modules = [
+    "agent_loop",
+    "agentmain",
+    "build_installer",
+    "ga",
+    "llmcore",
+    "media_handler",
+    "remoteserver",
+    "simphtml",
+    "TMWebDriver",
+    "workspace",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["frontends*", "memory*", "plugins*", "reflect*"]
+namespaces = true

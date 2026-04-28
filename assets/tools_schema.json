@@ -69,5 +69,80 @@
     "name": "start_long_term_update",
     "description": "Start distilling long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed",
     "parameters": {"type": "object", "properties": {}}}
-  }
+  },
+  {"type": "function", "function": {
+    "name": "workspace_open",
+    "description": "Open a local folder as the active workspace. Use to explore project directories, browse codebases, and get file tree overview.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Absolute path to the folder to open as workspace."}},
+      "required": ["path"]}}},
+  {"type": "function", "function": {
+    "name": "workspace_list",
+    "description": "List files and folders in the workspace or a specific path. Supports glob pattern filtering.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Path to list. Defaults to active workspace root."},
+      "pattern": {"type": "string", "description": "Glob pattern to filter files, e.g. *.py or *.md."}},
+      "required": []}}},
+  {"type": "function", "function": {
+    "name": "workspace_search",
+    "description": "Search for files by name within the workspace. Use when you only know part of a filename.",
+    "parameters": {"type": "object", "properties": {
+      "query": {"type": "string", "description": "Search query matching against file names."},
+      "path": {"type": "string", "description": "Directory to search. Defaults to active workspace root."}},
+      "required": ["query"]}}},
+  {"type": "function", "function": {
+    "name": "remote_connect",
+    "description": "Connect to a remote server via SSH. Use before remote_exec, remote_file_read/write. Supports key and password auth.",
+    "parameters": {"type": "object", "properties": {
+      "name": {"type": "string", "description": "Connection name, auto-generated if host provided."},
+      "host": {"type": "string", "description": "Server hostname or IP."},
+      "port": {"type": "integer", "description": "SSH port, default 22.", "default": 22},
+      "username": {"type": "string", "description": "SSH username.", "default": "root"},
+      "password": {"type": "string", "description": "SSH password. Prefer key_path."},
+      "key_path": {"type": "string", "description": "Path to SSH private key."}},
+      "required": []}}},
+  {"type": "function", "function": {
+    "name": "remote_exec",
+    "description": "Execute a shell command on a connected remote server with streaming output.",
+    "parameters": {"type": "object", "properties": {
+      "command": {"type": "string", "description": "Shell command to execute remotely."},
+      "server": {"type": "string", "description": "Server name. Omit to use first active connection."},
+      "timeout": {"type": "integer", "description": "Timeout seconds.", "default": 60},
+      "cwd": {"type": "string", "description": "Remote working directory."}},
+      "required": ["command"]}}},
+  {"type": "function", "function": {
+    "name": "remote_file_read",
+    "description": "Read a file from a connected remote server.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Absolute path on remote server."},
+      "server": {"type": "string", "description": "Server name. Omit to use first active connection."}},
+      "required": ["path"]}}},
+  {"type": "function", "function": {
+    "name": "remote_file_write",
+    "description": "Write content to a file on a connected remote server.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Absolute path on remote server."},
+      "content": {"type": "string", "description": "Content to write."},
+      "server": {"type": "string", "description": "Server name. Omit to use first active connection."}},
+      "required": ["path", "content"]}}},
+  {"type": "function", "function": {
+    "name": "remote_list_dir",
+    "description": "List directory contents on a connected remote server.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Remote directory path.", "default": "."},
+      "server": {"type": "string", "description": "Server name. Omit to use first active connection."}},
+      "required": []}}},
+  {"type": "function", "function": {
+    "name": "media_info",
+    "description": "Get detailed info about a media file: type, size, dimensions, duration, format, pages. Works with images, videos, audio, PDF, documents, archives.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Path to the media file."}},
+      "required": ["path"]}}},
+  {"type": "function", "function": {
+    "name": "media_extract",
+    "description": "Extract content from media: text from PDF/DOCX/XLSX, preview thumbnail from images/videos, or full metadata.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Path to the media file."},
+      "type": {"type": "string", "enum": ["text", "preview", "info"], "description": "text=readable content, preview=thumbnail, info=metadata", "default": "text"}},
+      "required": ["path"]}}}
 ]

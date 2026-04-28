@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# GenericAgent macOS Desktop App Installation Script
+# Generic Coder macOS Desktop App Installation Script
 #
 # Usage:
 #   bash assets/install-macos-app.sh [--auto]
 #
 # This installer creates a small .app bundle that opens Terminal and runs
-# `python3 launch.pyw` from the current GenericAgent checkout.
+# `python3 launch.pyw` from the current Generic Coder checkout.
 
 if [ -z "${BASH_VERSION}" ]; then
     if command -v bash >/dev/null 2>&1; then
@@ -32,18 +32,18 @@ for arg in "$@"; do
     esac
 done
 
-APP_NAME="GenericAgent"
+APP_NAME="Generic Coder"
 PRIMARY_INSTALL_DIR="/Applications"
 FALLBACK_INSTALL_DIR="${HOME}/Applications"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ICON_PATH="${PROJECT_ROOT}/assets/images/logo.jpg"
+ICON_PATH="${PROJECT_ROOT}/assets/generic_coder/icon.svg"
 LAUNCH_SCRIPT="${PROJECT_ROOT}/launch.pyw"
 
 echo -e "${CYAN}"
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║   GenericAgent — macOS Desktop App Installer             ║"
+echo "║   Generic Coder — macOS Desktop App Installer           ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -84,7 +84,7 @@ fi
 
 if [ "${AUTO_MODE}" = false ]; then
     echo ""
-    echo "This will install a desktop app that launches GenericAgent"
+    echo "This will install a desktop app that launches Generic Coder"
     echo "from Spotlight, Launchpad, or the Applications folder."
     echo ""
     if [ -n "${existing_app_path}" ]; then
@@ -117,7 +117,7 @@ APPLESCRIPT
 
 osacompile -o "${TMP_DIR}/${APP_NAME}.app" "${TMP_DIR}/${APP_NAME}.applescript"
 
-log_info "Applying GenericAgent icon..."
+log_info "Applying Generic Coder icon..."
 if [ -f "${ICON_PATH}" ]; then
     ICONSET_DIR="${TMP_DIR}/ga-icon.iconset"
     mkdir -p "${ICONSET_DIR}"
@@ -135,7 +135,7 @@ if [ -f "${ICON_PATH}" ]; then
 
     iconutil -c icns "${ICONSET_DIR}" -o "${TMP_DIR}/ga-icon.icns"
     cp "${TMP_DIR}/ga-icon.icns" "${TMP_DIR}/${APP_NAME}.app/Contents/Resources/applet.icns"
-    log_success "Icon applied from assets/images/logo.jpg"
+    log_success "Icon applied from assets/generic_coder/icon.svg"
 else
     log_warning "Logo not found at ${ICON_PATH}, using default icon."
 fi

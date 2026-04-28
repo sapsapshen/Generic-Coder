@@ -546,6 +546,204 @@ class GenericAgentHandler(BaseHandler):
         for hook in getattr(self.parent, '_turn_end_hooks', {}).values(): hook(locals())  # current readonly
         return next_prompt
 
+    def do_workspace_open(self, args, response):
+        path = args.get("path", "")
+        if not path:
+            path = os.getcwd()
+        path = os.path.abspath(path)
+        yield f"[Action] Opening workspace: {path}\n"
+        from workspace import WorkspaceManager
+        wm = WorkspaceManager()
+        if not hasattr(self, '_workspace_mgr'):
+            self._workspace_mgr = wm
+        result = self._workspace_mgr.open_folder(path)
+        tree = result.get('tree', {})
+        tree_str = json.dumps(tree, ensure_ascii=False, default=str)[:6000]
+        yield f"[Status] Workspace opened: {result.get('name', path)}\n"
+        yield f"```json\n{tree_str}\n```\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_workspace_list(self, args, response):
+        path = args.get("path", "")
+        pattern = args.get("pattern", "*")
+        yield f"[Action] Listing workspace files\n"
+        from workspace import WorkspaceManager
+        if not hasattr(self, '_workspace_mgr'):
+            self._workspace_mgr = WorkspaceManager()
+        result = self._workspace_mgr.list_files(path, pattern)
+        files = result.get('files', [])
+        files_str = json.dumps(files[:100], ensure_ascii=False)[:5000]
+        yield f"```json\n{files_str}\n```\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_workspace_search(self, args, response):
+        query = args.get("query", "")
+        path = args.get("path", "")
+        yield f"[Action] Searching workspace for: {query}\n"
+        from workspace import WorkspaceManager
+        if not hasattr(self, '_workspace_mgr'):
+            self._workspace_mgr = WorkspaceManager()
+        result = self._workspace_mgr.search_files(query, path)
+        results = result.get('results', [])
+        res_str = json.dumps(results[:50], ensure_ascii=False)[:5000]
+        yield f"```json\n{res_str}\n```\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def _get_remote_mgr(self):
+        if not hasattr(self, '_remote_mgr'):
+            from remoteserver import RemoteServerManager
+            self._remote_mgr = RemoteServerManager()
+        return self._remote_mgr
+
+    def do_remote_connect(self, args, response):
+        name = args.get("name", "")
+        host = args.get("host", "")
+        port = args.get("port", 22)
+        username = args.get("username", "root")
+        password = args.get("password", "")
+        key_path = args.get("key_path", "")
+        yield f"[Action] Connecting to remote: {host or name}\n"
+        from remoteserver import add_server_config, _simple_decrypt
+        mgr = self._get_remote_mgr()
+        if name and not host:
+            result = mgr.connect_to(name, password)
+        else:
+            name = name or f'{username}@{host}'
+            add_server_config(name=name, host=host, port=port, username=username,
+                            password=password, key_path=key_path)
+            result = mgr.connect_to(name, password)
+        status = result.get('status', 'error')
+        yield f"[Status] {'✅ Connected' if status == 'connected' else '❌ Failed'}: {result.get('msg', result.get('host', ''))}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_remote_exec(self, args, response):
+        command = args.get("command", "")
+        server_name = args.get("server", "")
+        timeout = args.get("timeout", 60)
+        cwd = args.get("cwd", "")
+        yield f"[Action] Remote exec: {command[:80]}...\n"
+        mgr = self._get_remote_mgr()
+        if server_name:
+            conn = mgr.get_connection(server_name)
+        else:
+            active = mgr.list_active_connections()
+            if not active:
+                return StepOutcome({"status": "error", "msg": "No active remote connections"}, next_prompt="\n")
+            conn = mgr.get_connection(active[0])
+        if not conn:
+            return StepOutcome({"status": "error", "msg": "Server not connected"}, next_prompt="\n")
+        gen = conn.exec_command(command, timeout=timeout, cwd=cwd)
+        result = None
+        for chunk in gen:
+            if isinstance(chunk, dict):
+                result = chunk
+            else:
+                yield chunk
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result or {"status": "done"}, next_prompt=next_prompt)
+
+    def do_remote_file_read(self, args, response):
+        path = args.get("path", "")
+        server_name = args.get("server", "")
+        yield f"[Action] Remote read: {path}\n"
+        mgr = self._get_remote_mgr()
+        if server_name:
+            conn = mgr.get_connection(server_name)
+        else:
+            active = mgr.list_active_connections()
+            if not active:
+                return StepOutcome({"status": "error", "msg": "No active remote connections"}, next_prompt="\n")
+            conn = mgr.get_connection(active[0])
+        if not conn:
+            return StepOutcome({"status": "error", "msg": "Server not connected"}, next_prompt="\n")
+        result = conn.remote_read(path)
+        content = result.get('content', '')
+        if len(content) > 10000:
+            result['content'] = content[:10000] + '\n\n... [truncated, use remote_exec to read remaining]'
+        yield smart_format(str(result), max_str_len=5000) + '\n'
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_remote_file_write(self, args, response):
+        path = args.get("path", "")
+        content = args.get("content", "")
+        server_name = args.get("server", "")
+        yield f"[Action] Remote write: {path}\n"
+        mgr = self._get_remote_mgr()
+        if server_name:
+            conn = mgr.get_connection(server_name)
+        else:
+            active = mgr.list_active_connections()
+            if not active:
+                return StepOutcome({"status": "error", "msg": "No active remote connections"}, next_prompt="\n")
+            conn = mgr.get_connection(active[0])
+        if not conn:
+            return StepOutcome({"status": "error", "msg": "Server not connected"}, next_prompt="\n")
+        result = conn.remote_write(path, content)
+        yield str(result) + '\n'
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_remote_list_dir(self, args, response):
+        path = args.get("path", ".")
+        server_name = args.get("server", "")
+        yield f"[Action] Remote list dir: {path}\n"
+        mgr = self._get_remote_mgr()
+        if server_name:
+            conn = mgr.get_connection(server_name)
+        else:
+            active = mgr.list_active_connections()
+            if not active:
+                return StepOutcome({"status": "error", "msg": "No active remote connections"}, next_prompt="\n")
+            conn = mgr.get_connection(active[0])
+        if not conn:
+            return StepOutcome({"status": "error", "msg": "Server not connected"}, next_prompt="\n")
+        result = conn.remote_list_dir(path)
+        items = result.get('items', [])
+        yield json.dumps(items[:100], ensure_ascii=False)[:5000] + '\n'
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_media_info(self, args, response):
+        path = args.get("path", "")
+        path = self._get_abs_path(path)
+        yield f"[Action] Getting media info: {path}\n"
+        from media_handler import get_media_handler
+        mh = get_media_handler()
+        result = mh.get_file_info(path)
+        info_str = json.dumps(result, ensure_ascii=False, default=str)[:6000]
+        if result.get('status') == 'success':
+            yield f"[Status] Type: {result.get('media_type', '?')}, Size: {result.get('size_human', '?')}\n"
+            yield f"```json\n{info_str}\n```\n"
+        else:
+            yield f"[Error] {result.get('msg', '')}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_media_extract(self, args, response):
+        path = args.get("path", "")
+        path = self._get_abs_path(path)
+        extract_type = args.get("type", "text")
+        yield f"[Action] Extracting {extract_type} from media: {path}\n"
+        from media_handler import get_media_handler
+        mh = get_media_handler()
+        if extract_type == "text":
+            result = mh.extract_text(path)
+        elif extract_type == "preview":
+            result = mh.generate_preview_url(path)
+        else:
+            result = mh.get_file_info(path)
+        content = result.get('text', result.get('preview', ''))
+        if content and len(content) > 8000:
+            result['text'] = content[:8000] + '\n\n... [truncated]'
+        yield smart_format(str(result), max_str_len=6000) + '\n'
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
 def get_global_memory():
     prompt = "\n"
     try:

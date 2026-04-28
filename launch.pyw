@@ -1,9 +1,28 @@
-import webview, threading, subprocess, sys, time, os, ctypes, atexit, socket, random
+import atexit
+import ctypes
+import os
+import random
+import socket
+import subprocess
+import sys
+import threading
+import time
 
-WINDOW_WIDTH, WINDOW_HEIGHT, RIGHT_PADDING, TOP_PADDING = 600, 900, 0, 100
+import webview
+from wsgiref.simple_server import WSGIRequestHandler, make_server
+
+WINDOW_WIDTH, WINDOW_HEIGHT, RIGHT_PADDING, TOP_PADDING = 1440, 940, 48, 68
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 frontends_dir = os.path.join(script_dir, "frontends")
+sys.path.insert(0, script_dir)
+
+from frontends.generic_coder_web import APP_NAME, create_app
+
+
+class QuietHandler(WSGIRequestHandler):
+    def log_message(self, format, *args):
+        return
 
 def find_free_port(lo=18501, hi=18599):
     ports = list(range(lo, hi+1)); random.shuffle(ports)
@@ -16,28 +35,24 @@ def get_screen_width():
     try: return ctypes.windll.user32.GetSystemMetrics(0)
     except: return 1920
 
-def start_streamlit(port):
-    global proc
-    cmd = [sys.executable, "-m", "streamlit", "run", os.path.join(frontends_dir, "stapp.py"), "--server.port", str(port), "--server.address", "localhost", "--server.headless", "true"]
-    proc = subprocess.Popen(cmd)
-    atexit.register(proc.kill)
+def start_web_frontend(port):
+    global server
+    server = make_server('127.0.0.1', port, create_app(), handler_class=QuietHandler)
+    atexit.register(server.shutdown)
+    server.serve_forever()
 
 def inject(text):
     window.evaluate_js(f"""
-        const textarea = document.querySelector('textarea[data-testid="stChatInputTextArea"]');
+        const textarea = document.getElementById('composer-input');
         if (textarea) {{
-            // 1. 用原生 setter 设置值（绕过 React）
-            const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-            nativeTextAreaValueSetter.call(textarea, {repr(text)});
-            // 2. 触发 React 的 input 事件
+            textarea.value = {repr(text)};
             textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            // 3. 触发 change 事件（有些组件需要）
-            textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            // 4. 延迟提交
             setTimeout(() => {{
-                const btn = document.querySelector('[data-testid="stChatInputSubmitButton"]');
-                if (btn) {{btn.click();console.log('Submitted:', {repr(text)});}}
-            }}, 200);
+                const form = document.getElementById('composer-form');
+                if (form) {{
+                    form.dispatchEvent(new Event('submit', {{ bubbles: true, cancelable: true }}));
+                }}
+            }}, 120);
         }}""")
 
 def get_last_reply_time():
@@ -54,7 +69,7 @@ PASTE_HOOK_JS = """if (!window._pasteHooked) { window._pasteHooked = true;
         for (const item of items) { if (item.kind === 'file') { t = item.type.startsWith('image/') ? 'image in clipboard, ' : 'file in clipboard, '; break; } }
         if (!t) return;
         e.preventDefault(); e.stopImmediatePropagation();
-        const el = document.querySelector('textarea[data-testid="stChatInputTextArea"]') || document.activeElement;
+        const el = document.getElementById('composer-input') || document.activeElement;
         if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
             const s = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
             s.call(el, el.value + t); el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -92,7 +107,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     port = str(find_free_port()) if args.port == '0' else args.port
     print(f'[Launch] Using port {port}')
-    threading.Thread(target=start_streamlit, args=(port,), daemon=True).start()
+    threading.Thread(target=start_web_frontend, args=(port,), daemon=True).start()
 
     if args.tg:
         tgproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "tgapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
@@ -136,9 +151,9 @@ if __name__ == '__main__':
         screen_width = get_screen_width()
         x_pos = screen_width - WINDOW_WIDTH - RIGHT_PADDING
     else: x_pos = 100
-    time.sleep(2) 
+    time.sleep(1.2)
     window = webview.create_window(
-        title='GenericAgent', url=f'http://localhost:{port}',
+        title=APP_NAME, url=f'http://localhost:{port}',
         width=WINDOW_WIDTH, height=WINDOW_HEIGHT, x=x_pos, y=TOP_PADDING,
         resizable=True, text_select=True)
     webview.start()

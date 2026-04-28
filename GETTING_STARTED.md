@@ -173,6 +173,32 @@ python3 launch.pyw
 
 启动后会出现一个桌面悬浮窗，直接在里面输入任务指令。
 
+### 打包成一键安装文件
+
+如果你想把程序分发给别人安装，而不是让对方自己配 Python，可以直接使用仓库自带的打包脚本：
+
+```bash
+pip install -e ".[installer,ui,media,remote,workspace]"
+python3 build_installer.py --target macos
+```
+
+在 macOS 上会直接生成：
+
+- `dist/Generic Coder.app`
+- `dist/Generic Coder-0.2.0.dmg`
+- `dist/Generic Coder-0.2.0.pkg`
+
+Windows 需要在 Windows 机器上执行：
+
+```powershell
+py -m pip install -e ".[installer,ui,media,remote,workspace]"
+py build_installer.py --target windows
+```
+
+会生成便携目录、压缩包，以及 Inno Setup 安装器脚本；如果系统已安装 Inno Setup 6，还会直接生成可双击安装的 `setup.exe`。
+
+如果你是直接从源码包分发给 Windows 用户，也可以让对方双击 `assets/install-windows-app.bat`。它会自动检查 Python、复制程序到 `%LocalAppData%\Programs\Generic Coder`、安装依赖、创建桌面和开始菜单快捷方式，并生成卸载脚本。
+
 ### 可选：让 Agent 帮你做的事
 
 ```
