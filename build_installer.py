@@ -6,7 +6,7 @@ DIST_DIR = PROJECT_ROOT / 'dist'
 BUILD_DIR = PROJECT_ROOT / 'build'
 
 APP_NAME = 'Generic Coder'
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 BUNDLE_ID = 'com.genericcoder.app'
 
 ICON_SVG = '''<?xml version="1.0" encoding="UTF-8"?>

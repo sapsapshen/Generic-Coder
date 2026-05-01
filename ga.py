@@ -252,10 +252,228 @@ def smart_format(data, max_str_len=100, omit_str=' ... '):
     return f"{data[:max_str_len//2]}{omit_str}{data[-max_str_len//2:]}"
 
 def consume_file(dr, file):
-    if dr and os.path.exists(os.path.join(dr, file)): 
+    if dr and os.path.exists(os.path.join(dr, file)):
         with open(os.path.join(dr, file), encoding='utf-8', errors='replace') as f: content = f.read()
         os.remove(os.path.join(dr, file))
         return content
+
+
+# ── content_search ─────────────────────────────────────────────
+def _rg_search(pattern, search_path, glob_pat, context_lines, max_results, case_sensitive):
+    """Search via ripgrep subprocess using JSON output for accurate match/context parsing."""
+    cmd = ["rg", "--json", "--no-messages"]
+    if not case_sensitive: cmd.append("--ignore-case")
+    if context_lines: cmd.extend(["-C", str(context_lines)])
+    if glob_pat: cmd.extend(["--glob", glob_pat])
+    cmd.extend(["--", pattern, search_path])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=script_dir)
+        if proc.returncode == 1: return []  # no matches
+        if proc.returncode > 1: raise RuntimeError(proc.stderr.strip())
+        results = []
+        current = None
+        for line in proc.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            typ = obj.get("type")
+            data = obj.get("data", {})
+            if typ == "match":
+                if current: results.append(current)
+                if len(results) >= max_results: break
+                match_text = data.get("lines", {}).get("text", "").rstrip('\n')
+                current = {
+                    "file": data.get("path", {}).get("text", ""),
+                    "line": data.get("line_number", 0),
+                    "content": match_text,
+                    "context": []
+                }
+            elif typ == "context" and current is not None:
+                ctx_text = data.get("lines", {}).get("text", "").rstrip('\n')
+                current["context"].append(ctx_text)
+            elif typ == "end" and current is not None:
+                continue  # end of a match group, don't do anything special
+        if current: results.append(current)
+        return results[:max_results]
+    except FileNotFoundError:
+        return None  # rg not installed
+    except Exception as e:
+        return {"status": "error", "msg": str(e)}
+
+
+def _py_search(pattern, search_path, glob_pat, context_lines, max_results, case_sensitive):
+    """Pure-Python fallback for content_search when ripgrep is unavailable."""
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try: regex = re.compile(pattern, flags)
+    except re.error as e: return {"status": "error", "msg": f"Invalid regex: {e}"}
+
+    results = []
+    search_root = Path(search_path).resolve()
+    if not search_root.exists(): return {"status": "error", "msg": f"Path not found: {search_path}"}
+
+    def walk():
+        if search_root.is_file():
+            yield search_root
+        else:
+            for root, dirs, files in os.walk(search_root):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__', '.git')]
+                for f in files:
+                    fpath = Path(root) / f
+                    if glob_pat and not fpath.match(glob_pat): continue
+                    yield fpath
+
+    for fpath in walk():
+        if len(results) >= max_results: break
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+            for i, line in enumerate(lines):
+                if regex.search(line):
+                    ctx_start = max(0, i - context_lines)
+                    ctx_end = min(len(lines), i + context_lines + 1)
+                    ctx = [f"  {j+1}|{lines[j].rstrip()}" for j in range(ctx_start, ctx_end) if j != i]
+                    results.append({
+                        "file": str(fpath),
+                        "line": i + 1,
+                        "content": line.rstrip(),
+                        "context": ctx[:context_lines * 2 + 2]
+                    })
+                    if len(results) >= max_results: break
+        except (PermissionError, UnicodeDecodeError, OSError):
+            continue
+    return results
+
+
+def content_search(pattern, path=None, glob_pat=None, context_lines=2, max_results=50, case_sensitive=True):
+    search_path = path or os.getcwd()
+    if not os.path.isabs(search_path):
+        search_path = os.path.abspath(os.path.join(script_dir, 'temp', search_path))
+
+    # Try ripgrep first
+    result = _rg_search(pattern, search_path, glob_pat, context_lines, max_results, case_sensitive)
+    if result is None:
+        result = _py_search(pattern, search_path, glob_pat, context_lines, max_results, case_sensitive)
+
+    if isinstance(result, dict): return result  # error dict
+
+    return {
+        "status": "success",
+        "matches": len(result),
+        "pattern": pattern,
+        "results": result
+    }
+
+
+# ── git tools ──────────────────────────────────────────────────
+def _find_git_root(path=None):
+    """Find the git root directory for a given path."""
+    start = Path(path or os.getcwd()).resolve()
+    for p in [start] + list(start.parents):
+        if (p / ".git").exists(): return str(p)
+    return None
+
+
+def _run_git(subcmd, repo_path=None, timeout=15):
+    """Run a git command and return (stdout, stderr, returncode)."""
+    cmd = ["git"] + subcmd
+    cwd = repo_path or os.path.join(script_dir, 'temp')
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return proc.stdout, proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired:
+        return "", "timeout", -1
+    except FileNotFoundError:
+        return "", "git not found", -2
+
+
+def git_status(path=None):
+    repo = _find_git_root(path)
+    if not repo: return {"status": "error", "msg": "Not a git repository (no .git found)"}
+    stdout, stderr, rc = _run_git(["status", "--porcelain"], repo)
+    if rc != 0: return {"status": "error", "msg": stderr or "git status failed"}
+    files = [l for l in stdout.splitlines() if l.strip()]
+    return {"status": "success", "repo": repo, "files": len(files), "output": stdout}
+
+
+def git_diff(staged=False, path=None, path_repo=None):
+    repo = _find_git_root(path_repo or path)
+    if not repo: return {"status": "error", "msg": "Not a git repository"}
+    cmd = ["diff"]
+    if staged: cmd.append("--staged")
+    cmd.append("--")  # separator for path safety
+    if path: cmd.append(path)
+    else: cmd.append(".")
+    stdout, stderr, rc = _run_git(cmd, repo)
+    if rc != 0: return {"status": "error", "msg": stderr or "git diff failed"}
+    return {"status": "success", "repo": repo, "has_changes": bool(stdout.strip()),
+            "output": smart_format(stdout, max_str_len=12000)}
+
+
+def git_log(count=10, path_repo=None):
+    repo = _find_git_root(path_repo)
+    if not repo: return {"status": "error", "msg": "Not a git repository"}
+    stdout, stderr, rc = _run_git(["log", f"-{count}", "--oneline", "--decorate"], repo)
+    if rc != 0: return {"status": "error", "msg": stderr or "git log failed"}
+    return {"status": "success", "repo": repo, "output": stdout}
+
+
+# ── file backup / revert ───────────────────────────────────────
+BACKUP_DIR = os.path.join(script_dir, 'temp', 'backups')
+
+def _backup_root(task_id=""):
+    """Get the backup root for a task. task_id is typically session-derived."""
+    root = os.path.join(BACKUP_DIR, task_id or "default")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def file_backup(file_path, task_id=""):
+    """Create a timestamped backup of a file before modification. Returns backup path or None."""
+    if not os.path.isfile(file_path): return None
+    abs_path = os.path.abspath(file_path)
+    # Encode path: use _FS_ for directory separators to avoid ambiguity
+    safe_name = abs_path.replace('\\', '_FS_').replace('/', '_FS_')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    backup_path = os.path.join(_backup_root(task_id), f"{safe_name}.{ts}.bak")
+    try:
+        with open(abs_path, 'rb') as src, open(backup_path, 'wb') as dst:
+            dst.write(src.read())
+        return backup_path
+    except Exception:
+        return None
+
+
+def file_revert(file_path, task_id=""):
+    """Revert a file to its most recent backup."""
+    abs_path = os.path.abspath(file_path)
+    safe_name = abs_path.replace('\\', '_FS_').replace('/', '_FS_')
+    root = _backup_root(task_id)
+    # Find all backups for this file, sorted by timestamp (newest first)
+    try:
+        backups = sorted(
+            [f for f in os.listdir(root) if f.startswith(safe_name + '.')],
+            reverse=True
+        )
+    except FileNotFoundError:
+        return {"status": "error", "msg": f"No backups found for {file_path}"}
+    if not backups:
+        return {"status": "error", "msg": f"No backups found for {file_path}"}
+
+    # Try each backup from newest to oldest
+    last_error = None
+    for bk in backups:
+        bk_path = os.path.join(root, bk)
+        try:
+            with open(bk_path, 'rb') as src, open(abs_path, 'wb') as dst:
+                dst.write(src.read())
+            return {"status": "success", "msg": f"Restored {file_path} from backup {bk}",
+                    "backup_file": bk_path}
+        except Exception as e:
+            last_error = str(e)
+            continue
+    return {"status": "error", "msg": f"Failed to revert: {last_error}"}
+
 
 class GenericAgentHandler(BaseHandler):
     '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
@@ -353,6 +571,9 @@ class GenericAgentHandler(BaseHandler):
     def do_file_patch(self, args, response):
         path = self._get_abs_path(args.get("path", ""))
         yield f"[Action] Patching file: {path}\n"
+        # auto-backup before modification
+        bk = file_backup(path, self._backup_task_id)
+        if bk: yield f"[Backup] {os.path.basename(bk)}\n"
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")
         try: new_content = expand_file_refs(new_content, base_dir=self.cwd)
@@ -371,6 +592,10 @@ class GenericAgentHandler(BaseHandler):
         mode = args.get("mode", "overwrite")  # overwrite/append/prepend
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
+        # auto-backup before overwrite (not for append/prepend — those are additive)
+        if mode == "overwrite":
+            bk = file_backup(path, self._backup_task_id)
+            if bk: yield f"[Backup] {os.path.basename(bk)}\n"
 
         def extract_robust_content(text):
             tag = re.search(r"<file_content[^>]*>(.*)</file_content>", text, re.DOTALL)
@@ -743,6 +968,90 @@ class GenericAgentHandler(BaseHandler):
         yield smart_format(str(result), max_str_len=6000) + '\n'
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
+
+    @property
+    def _backup_task_id(self):
+        """Derive a stable backup identifier from the parent task or cwd."""
+        if hasattr(self.parent, 'task_dir') and self.parent.task_dir:
+            return os.path.basename(str(self.parent.task_dir).rstrip('/'))
+        return getattr(self.parent, 'id', '') or 'default'
+
+    def do_content_search(self, args, response):
+        pattern = args.get("pattern", "")
+        search_path = args.get("path") or getattr(self, '_workspace_root', None) or self.cwd
+        glob_pat = args.get("glob")
+        context_lines = args.get("context_lines", 2)
+        max_results = args.get("max_results", 50)
+        case_sensitive = args.get("case_sensitive", True)
+
+        yield f"[Action] Searching: /{pattern}/ in {search_path}\n"
+        result = content_search(pattern, search_path, glob_pat, context_lines, max_results, case_sensitive)
+
+        if result.get("status") == "error":
+            yield f"[Error] {result.get('msg')}\n"
+        else:
+            matches = result.get("matches", 0)
+            yield f"[Status] Found {matches} match(es)\n"
+            for r in result.get("results", []):
+                yield f"  {r['file']}:{r['line']}|{r['content']}\n"
+                for ctx_line in r.get("context", []):
+                    yield f"    {ctx_line}\n"
+                yield "\n"
+
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_git_status(self, args, response):
+        path = args.get("path")
+        yield f"[Action] git status\n"
+        result = git_status(path)
+        if result.get("status") == "error":
+            yield f"[Error] {result.get('msg')}\n"
+        else:
+            yield f"[Status] Repo: {result.get('repo')} | {result.get('files')} changed file(s)\n"
+            if result.get("output"): yield f"```\n{result['output']}```\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_git_diff(self, args, response):
+        staged = args.get("staged", False)
+        path = args.get("path")
+        path_repo = args.get("path_repo")
+        label = "staged" if staged else "unstaged"
+        yield f"[Action] git diff ({label})\n"
+        result = git_diff(staged=staged, path=path, path_repo=path_repo)
+        if result.get("status") == "error":
+            yield f"[Error] {result.get('msg')}\n"
+        else:
+            yield f"[Status] {'Has changes' if result.get('has_changes') else 'No changes'}\n"
+            if result.get("output"): yield f"```diff\n{result['output']}\n```\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_git_log(self, args, response):
+        count = args.get("count", 10)
+        path_repo = args.get("path_repo")
+        yield f"[Action] git log (-{count})\n"
+        result = git_log(count=count, path_repo=path_repo)
+        if result.get("status") == "error":
+            yield f"[Error] {result.get('msg')}\n"
+        else:
+            yield f"[Status] Recent commits in {result.get('repo')}:\n"
+            if result.get("output"): yield f"```\n{result['output']}```\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_file_revert(self, args, response):
+        path = self._get_abs_path(args.get("path", ""))
+        yield f"[Action] Reverting file: {path}\n"
+        result = file_revert(path, self._backup_task_id)
+        if result.get("status") == "success":
+            yield f"[Status] ✅ {result.get('msg')}\n"
+        else:
+            yield f"[Status] ❌ {result.get('msg')}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
 
 def get_global_memory():
     prompt = "\n"

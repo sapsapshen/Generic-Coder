@@ -612,6 +612,116 @@ def create_app() -> Bottle:
     def task(task_id: str) -> HTTPResponse:
         return json_response(STATE.task_payload(task_id))
 
+    @app.get("/api/workspace/tree")
+    def workspace_tree() -> HTTPResponse:
+        """Return a lightweight file tree for the active workspace."""
+        active = STATE.workspace_manager.get_active_workspace()
+        if active.get("status") != "success":
+            return json_response({"error": "No active workspace", "tree": []})
+        root = active["path"]
+        tree = _build_flat_tree(root, root)
+        return json_response({"path": root, "tree": tree})
+
+    def _build_flat_tree(root, base, max_files=200):
+        """Build a flat sorted file list with depth info for rendering."""
+        entries = []
+        try:
+            for name in sorted(os.listdir(base)):
+                full = os.path.join(base, name)
+                depth = len(full[len(root):].split(os.sep)) - 1
+                if name.startswith('.') or name in ('node_modules', '__pycache__', '.git'):
+                    continue
+                if os.path.isdir(full):
+                    entries.append({"name": name, "path": full, "type": "dir", "depth": depth})
+                    if len(entries) < max_files:
+                        entries.extend(_build_flat_tree(root, full, max_files - len(entries)))
+                else:
+                    entries.append({"name": name, "path": full, "type": "file", "depth": depth})
+                if len(entries) >= max_files:
+                    break
+        except (PermissionError, OSError):
+            pass
+        return entries
+
+    @app.get("/api/workspace/files")
+    def workspace_files() -> HTTPResponse:
+        """Return matching files for @-mention auto-complete."""
+        query = request.query.get("q", "").strip()
+        limit = int(request.query.get("limit", "15"))
+        active = STATE.workspace_manager.get_active_workspace()
+        if active.get("status") != "success":
+            return json_response({"files": []})
+        root = active["path"]
+        results = []
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in ('node_modules', '__pycache__', '.git')]
+                for f in filenames:
+                    if f.startswith('.'): continue
+                    full = os.path.join(dirpath, f)
+                    rel = os.path.relpath(full, root)
+                    if query and query.lower() not in rel.lower(): continue
+                    results.append({"name": f, "path": full, "rel": rel})
+                    if len(results) >= limit * 3:
+                        break
+                if len(results) >= limit * 3:
+                    break
+        except (PermissionError, OSError):
+            pass
+        # Sort by relevance: exact basename match first, then substring
+        if query:
+            ql = query.lower()
+            results.sort(key=lambda x: (0 if ql in x["name"].lower() else 1, x["rel"]))
+        return json_response({"files": results[:limit]})
+
+    @app.post("/api/upload")
+    def upload_image() -> HTTPResponse:
+        """Accept pasted/dropped images, save to temp, return path reference."""
+        import base64 as _b64
+        payload = request.json or {}
+        data_url = str(payload.get("data", "")).strip()
+        if not data_url or not data_url.startswith("data:image/"):
+            return json_response({"error": "No valid image data provided"}, status=400)
+        try:
+            header, b64data = data_url.split(",", 1)
+            img_data = _b64.b64decode(b64data)
+        except Exception:
+            return json_response({"error": "Invalid base64 image data"}, status=400)
+
+        # Determine extension
+        ext = "png"
+        if "image/jpeg" in header or "image/jpg" in header:
+            ext = "jpg"
+        elif "image/gif" in header:
+            ext = "gif"
+        elif "image/webp" in header:
+            ext = "webp"
+
+        upload_dir = str(BASE_DIR / "temp" / "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        ts = int(time.time() * 1000)
+        filename = f"pasted_{ts}.{ext}"
+        filepath = os.path.join(upload_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(img_data)
+        return json_response({"path": filepath, "name": filename, "size": len(img_data)})
+
+    @app.get("/api/plan/status")
+    def plan_status() -> HTTPResponse:
+        """Return plan mode status: whether in plan mode, plan file path, remaining tasks."""
+        handler = getattr(STATE.agent, 'handler', None)
+        if not handler:
+            return json_response({"in_plan": False, "plan_path": "", "remaining": -1})
+        plan_path = handler._in_plan_mode() if hasattr(handler, '_in_plan_mode') else None
+        if not plan_path:
+            return json_response({"in_plan": False, "plan_path": "", "remaining": -1})
+        remaining = handler._check_plan_completion() if hasattr(handler, '_check_plan_completion') else -1
+        return json_response({
+            "in_plan": True,
+            "plan_path": plan_path,
+            "remaining": remaining,
+        })
+
     @app.get("/api/sessions")
     def sessions() -> HTTPResponse:
         return json_response(STATE.list_sessions_payload())
@@ -619,6 +729,112 @@ def create_app() -> Bottle:
     @app.post("/api/stop")
     def stop() -> HTTPResponse:
         return json_response(STATE.stop())
+
+    @app.get("/api/changes")
+    def list_changes() -> HTTPResponse:
+        """List files that have backups (were modified by the agent)."""
+        from datetime import datetime as _dt
+        backup_root = str(BASE_DIR / "temp" / "backups")
+        if not os.path.isdir(backup_root):
+            return json_response({"changes": []})
+        changes = []
+        seen_files = set()
+        for bk_dir in [backup_root] + [os.path.join(backup_root, d) for d in os.listdir(backup_root) if os.path.isdir(os.path.join(backup_root, d))]:
+            if not os.path.isdir(bk_dir): continue
+            for bk_file in sorted(os.listdir(bk_dir), reverse=True):
+                if not bk_file.endswith('.bak'): continue
+                try:
+                    # Filename format: {safe_name}.{timestamp}.bak
+                    # safe_name uses _FS_ as dir separator
+                    parts = bk_file.rsplit('.', 2)
+                    if len(parts) < 3: continue
+                    safe_name = parts[0]
+                    original = safe_name.replace('_FS_', os.sep)
+                    if original in seen_files: continue
+                    seen_files.add(original)
+                    bk_path = os.path.join(bk_dir, bk_file)
+                    mtime = os.path.getmtime(bk_path)
+                    exists_now = os.path.exists(original)
+                    changes.append({
+                        "path": original,
+                        "basename": os.path.basename(original),
+                        "backup_time": _dt.fromtimestamp(mtime).strftime('%H:%M:%S'),
+                        "backup_file": bk_path,
+                        "exists": exists_now,
+                    })
+                except Exception:
+                    continue
+        changes.sort(key=lambda x: x["backup_time"], reverse=True)
+        return json_response({"changes": changes[:30]})
+
+    @app.post("/api/diff")
+    def file_diff() -> HTTPResponse:
+        """Return unified diff between backup and current file."""
+        import difflib as _dl
+        payload = request.json or {}
+        path = str(payload.get("path", "")).strip()
+        if not path:
+            return json_response({"error": "path required"}, status=400)
+        abs_path = os.path.abspath(path)
+        safe_name = abs_path.replace('\\', '_FS_').replace('/', '_FS_')
+        backup_root = str(BASE_DIR / "temp" / "backups")
+
+        # Find the newest backup
+        best = None
+        best_ts = ""
+        for bk_dir in [backup_root] + [os.path.join(backup_root, d) for d in os.listdir(backup_root) if os.path.isdir(os.path.join(backup_root, d))]:
+            if not os.path.isdir(bk_dir): continue
+            for f in os.listdir(bk_dir):
+                if f.startswith(safe_name + '.') and f.endswith('.bak'):
+                    ts = f[len(safe_name) + 1:].replace('.bak', '')
+                    if ts > best_ts:
+                        best_ts = ts
+                        best = os.path.join(bk_dir, f)
+
+        if not best:
+            return json_response({"error": f"No backup found for {path}"}, status=404)
+
+        try:
+            with open(best, 'r', encoding='utf-8', errors='replace') as f:
+                old_lines = f.readlines()
+        except Exception as e:
+            return json_response({"error": f"Failed to read backup: {e}"}, status=500)
+
+        if os.path.exists(abs_path):
+            with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+                new_lines = f.readlines()
+        else:
+            new_lines = []
+
+        diff_lines = list(_dl.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"a/{os.path.basename(path)} (backup)",
+            tofile=f"b/{os.path.basename(path)} (current)",
+        ))
+        return json_response({
+            "path": path,
+            "backup_file": best,
+            "diff": ''.join(diff_lines),
+            "has_changes": len(diff_lines) > 0,
+        })
+
+    @app.post("/api/revert")
+    def revert_file() -> HTTPResponse:
+        """Revert a file to its most recent backup."""
+        payload = request.json or {}
+        path = str(payload.get("path", "")).strip()
+        if not path:
+            return json_response({"error": "path required"}, status=400)
+        from ga import file_revert as _revert
+        result = _revert(path)
+        if result.get("status") == "success":
+            # Also remove the backup so it doesn't show again
+            try:
+                os.remove(result.get("backup_file", ""))
+            except Exception:
+                pass
+            return json_response(result)
+        return json_response(result, status=400)
 
     return app
 

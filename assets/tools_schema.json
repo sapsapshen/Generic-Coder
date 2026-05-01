@@ -139,6 +139,44 @@
       "path": {"type": "string", "description": "Path to the media file."}},
       "required": ["path"]}}},
   {"type": "function", "function": {
+    "name": "content_search",
+    "description": "Search file contents by regex pattern (powered by ripgrep). Essential for exploring codebases: find function defs, usages, TODOs, etc.",
+    "parameters": {"type": "object", "properties": {
+      "pattern": {"type": "string", "description": "Regex pattern to search for."},
+      "path": {"type": "string", "description": "Directory or file to search. Defaults to workspace root or cwd."},
+      "glob": {"type": "string", "description": "Filename glob filter, e.g. *.py or **/*.js."},
+      "context_lines": {"type": "integer", "description": "Lines of context around each match.", "default": 2},
+      "max_results": {"type": "integer", "description": "Max matches to return.", "default": 50},
+      "case_sensitive": {"type": "boolean", "description": "Case-sensitive search.", "default": true}},
+      "required": ["pattern"]}}},
+  {"type": "function", "function": {
+    "name": "git_status",
+    "description": "Show working tree status (porcelain format). See what files are modified, staged, or untracked.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "Repo path. Defaults to workspace root or cwd."}},
+      "required": []}}},
+  {"type": "function", "function": {
+    "name": "git_diff",
+    "description": "Show git diff of working tree changes. Use to review what the agent (or user) has modified before committing.",
+    "parameters": {"type": "object", "properties": {
+      "staged": {"type": "boolean", "description": "Show staged changes instead of unstaged.", "default": false},
+      "path": {"type": "string", "description": "File or directory to diff. Omit for all."},
+      "path_repo": {"type": "string", "description": "Repo path. Defaults to workspace root or cwd."}},
+      "required": []}}},
+  {"type": "function", "function": {
+    "name": "git_log",
+    "description": "Show recent commit history.",
+    "parameters": {"type": "object", "properties": {
+      "count": {"type": "integer", "description": "Number of recent commits.", "default": 10},
+      "path_repo": {"type": "string", "description": "Repo path. Defaults to workspace root or cwd."}},
+      "required": []}}},
+  {"type": "function", "function": {
+    "name": "file_revert",
+    "description": "Revert a file to its most recent backup (created automatically before file_patch/file_write). Use when agent modifications went wrong.",
+    "parameters": {"type": "object", "properties": {
+      "path": {"type": "string", "description": "File path to revert."}},
+      "required": ["path"]}}},
+  {"type": "function", "function": {
     "name": "media_extract",
     "description": "Extract content from media: text from PDF/DOCX/XLSX, preview thumbnail from images/videos, or full metadata.",
     "parameters": {"type": "object", "properties": {

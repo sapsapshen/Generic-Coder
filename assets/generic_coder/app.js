@@ -680,10 +680,120 @@ function escapeHtml(text) {
 }
 
 function renderContent(text, streaming = false) {
-  const escaped = escapeHtml(text || '...');
-  const withCode = escaped.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
-  const withInline = withCode.replace(/`([^`]+)`/g, '<code>$1</code>');
-  return `<div class="message-card__body${streaming ? ' is-streaming' : ''}">${withInline.replace(/\n/g, '<br />')}</div>`;
+  if (!text) return `<div class="message-card__body${streaming ? ' is-streaming' : ''}">...</div>`;
+
+  const placeholders = [];
+
+  // ── Extract blocks that need special handling ──────────
+  let html = text;
+
+  // Code blocks (protect from escaping)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = placeholders.length;
+    placeholders.push({ type: 'code', lang, code });
+    return `\x00C${idx}\x00`;
+  });
+
+  // Thinking blocks
+  html = html.replace(/<thinking>([\s\S]*?)<\/thinking>/g, (_, content) => {
+    const idx = placeholders.length;
+    placeholders.push({ type: 'thinking', content });
+    return `\x00T${idx}\x00`;
+  });
+
+  // Summary badges
+  html = html.replace(/<summary>(.*?)<\/summary>/g, (_, content) => {
+    const idx = placeholders.length;
+    placeholders.push({ type: 'summary', content });
+    return `\x00S${idx}\x00`;
+  });
+
+  // ── Escape remaining text ──────────────────────────────
+  html = escapeHtml(html);
+
+  // ── Inline formatting ──────────────────────────────────
+  html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+  // ── Status tags ────────────────────────────────────────
+  html = html.replace(/\[Action\]/g, '<span class="action-tag">Action</span>');
+  html = html.replace(/\[Status\]/g, '<span class="status-tag">Status</span>');
+  html = html.replace(/\[Error\]/g, '<span class="error-tag">Error</span>');
+  html = html.replace(/\[Warn\]/g, '<span class="warn-tag">Warn</span>');
+  html = html.replace(/\[Info\]/g, '<span class="info-tag">Info</span>');
+  html = html.replace(/\[Backup\]/g, '<span class="backup-tag">Backup</span>');
+  html = html.replace(/✅/g, '<span class="status-icon ok">✅</span>');
+  html = html.replace(/❌/g, '<span class="status-icon err">❌</span>');
+  html = html.replace(/⚠️/g, '<span class="status-icon warn">⚠️</span>');
+
+  // ── Line breaks ────────────────────────────────────────
+  html = html.replace(/\n/g, '<br />');
+
+  // ── Restore placeholders ───────────────────────────────
+  html = html.replace(/\x00C(\d+)\x00/g, (_, idx) => {
+    const p = placeholders[idx];
+    if (!p) return '';
+    const langLabel = p.lang ? `<span class="code-lang">${escapeHtml(p.lang)}</span>` : '';
+    return `<div class="code-block-wrapper">${langLabel}<pre><code>${highlightCode(escapeHtml(p.code), p.lang)}</code></pre></div>`;
+  });
+
+  html = html.replace(/\x00T(\d+)\x00/g, (_, idx) => {
+    const p = placeholders[idx];
+    if (!p) return '';
+    const escaped = escapeHtml(p.content).replace(/\n/g, '<br />');
+    const preview = p.content.replace(/<[^>]*>/g, '').trim().slice(0, 80);
+    return `<details class="thinking-block"><summary class="thinking-summary">Thinking</summary><div class="thinking-content">${escaped}</div></details>`;
+  });
+
+  html = html.replace(/\x00S(\d+)\x00/g, (_, idx) => {
+    const p = placeholders[idx];
+    if (!p) return '';
+    return `<span class="summary-badge">${escapeHtml(p.content)}</span>`;
+  });
+
+  return `<div class="message-card__body${streaming ? ' is-streaming' : ''}">${html}</div>`;
+}
+
+function highlightCode(code, lang) {
+  // Simple keyword-based syntax highlighting
+  const kwMap = {
+    python: ['def', 'class', 'import', 'from', 'return', 'if', 'else', 'elif', 'for', 'while', 'try', 'except', 'finally', 'with', 'as', 'yield', 'lambda', 'pass', 'break', 'continue', 'and', 'or', 'not', 'in', 'is', 'None', 'True', 'False', 'self', 'raise', 'async', 'await'],
+    javascript: ['function', 'const', 'let', 'var', 'return', 'if', 'else', 'for', 'while', 'try', 'catch', 'finally', 'class', 'import', 'export', 'default', 'from', 'async', 'await', 'new', 'this', 'null', 'undefined', 'true', 'false', 'typeof', 'instanceof'],
+    bash: ['echo', 'export', 'source', 'cd', 'ls', 'rm', 'cp', 'mv', 'mkdir', 'grep', 'sed', 'awk', 'cat', 'chmod', 'sudo', 'git', 'pip', 'npm', 'python', 'node', 'docker', 'curl', 'wget'],
+    typescript: ['function', 'const', 'let', 'var', 'return', 'if', 'else', 'class', 'interface', 'type', 'enum', 'import', 'export', 'async', 'await'],
+    json: [],
+    html: [],
+    css: [],
+    sql: ['SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'TABLE', 'INTO', 'VALUES', 'SET', 'AND', 'OR', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'GROUP', 'BY', 'ORDER', 'LIMIT', 'HAVING', 'COUNT', 'SUM', 'AVG', 'AS', 'ON', 'NOT', 'NULL', 'PRIMARY', 'KEY', 'FOREIGN', 'INDEX'],
+    diff: [],
+    text: [],
+  };
+
+  const keywords = kwMap[lang] || kwMap.python;
+  if (!keywords.length) return code;
+
+  // Tokenize and highlight
+  let result = '';
+  const regex = new RegExp(
+    `(^#.*$)|("[^"]*")|('[^']*')|(\\b\\d+\\.?\\d*\\b)|(\\b(?:${keywords.join('|')})\\b)|(^\\[.*\\]$)`,
+    'gim'
+  );
+
+  let lastIdx = 0;
+  let match;
+  while ((match = regex.exec(code)) !== null) {
+    result += code.slice(lastIdx, match.index);
+    if (match[1]) result += `<span class="hl-comment">${match[1]}</span>`;       // comment
+    else if (match[2]) result += `<span class="hl-string">${match[2]}</span>`;   // double-quoted
+    else if (match[3]) result += `<span class="hl-string">${match[3]}</span>`;   // single-quoted
+    else if (match[4]) result += `<span class="hl-number">${match[4]}</span>`;   // number
+    else if (match[5]) result += `<span class="hl-keyword">${match[5]}</span>`;  // keyword
+    else if (match[6]) result += `<span class="hl-tag">${match[6]}</span>`;      // bracket tag
+    lastIdx = regex.lastIndex;
+  }
+  result += code.slice(lastIdx);
+  return result;
 }
 
 function roleLabel(role) {
@@ -694,12 +804,18 @@ function renderMessages() {
   feedEl.innerHTML = state.messages.map((message) => {
     const roleClass = message.role === 'user' ? 'message-card--user' : 'message-card--assistant';
     const streaming = Boolean(message.streaming);
+    const content = message.content || '';
+    const isLong = !streaming && message.role === 'assistant' && (content.length > 3000 || content.split('\n').length > 50);
     return `
-      <article class="message-card ${roleClass}">
+      <article class="message-card ${roleClass}" data-message-len="${content.length}">
         <div class="message-card__meta">
           <span>${roleLabel(message.role)}</span>
+          ${isLong ? '<span class="message-card__length-badge">Long output</span>' : ''}
         </div>
-        ${renderContent(message.content, streaming)}
+        <div class="message-card__body-wrapper ${isLong ? 'message-card__body-wrapper--collapsed' : ''}">
+          ${renderContent(content, streaming)}
+        </div>
+        ${isLong ? '<button class="expand-output-btn">Show full output ▼</button>' : ''}
       </article>
     `;
   }).join('');
@@ -708,6 +824,23 @@ function renderMessages() {
   feedEl.scrollTop = feedEl.scrollHeight;
   const lastAssistant = [...state.messages].reverse().find((item) => item.role === 'assistant' && !item.streaming);
   lastReplyTimeEl.textContent = String(lastAssistant ? Date.now() : 0);
+
+  // Wire up expand buttons
+  feedEl.querySelectorAll('.expand-output-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const wrapper = btn.parentElement.querySelector('.message-card__body-wrapper');
+      const isCollapsed = wrapper.classList.contains('message-card__body-wrapper--collapsed');
+      if (isCollapsed) {
+        wrapper.classList.remove('message-card__body-wrapper--collapsed');
+        btn.textContent = 'Show less ▲';
+      } else {
+        wrapper.classList.add('message-card__body-wrapper--collapsed');
+        btn.textContent = 'Show full output ▼';
+        // Scroll to the start of this message
+        btn.parentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  });
 }
 
 function setRunning(isRunning) {
@@ -717,7 +850,33 @@ function setRunning(isRunning) {
   sendButton.disabled = isRunning;
   document.getElementById('stop-button').disabled = !isRunning;
   document.getElementById('new-chat-button').disabled = isRunning;
+  document.getElementById('turn-progress').hidden = !isRunning;
+  if (!isRunning) {
+    document.getElementById('turn-fill').style.width = '0%';
+  }
 }
+
+// Override renderMessages to parse turn info from streaming content
+const _origRenderMessages = renderMessages;
+renderMessages = function() {
+  _origRenderMessages();
+
+  // Parse turn from last streaming message
+  if (state.isRunning) {
+    const lastMsg = [...state.messages].reverse().find((item) => item.streaming);
+    if (lastMsg) {
+      const match = lastMsg.content.match(/LLM Running \(Turn (\d+)\)/);
+      if (match) {
+        const turn = parseInt(match[1]);
+        const maxTurns = 70;
+        const pct = Math.round((turn / maxTurns) * 100);
+        document.getElementById('turn-progress').hidden = false;
+        document.getElementById('turn-label').textContent = `T${turn}/${maxTurns}`;
+        document.getElementById('turn-fill').style.width = `${pct}%`;
+      }
+    }
+  }
+};
 
 function showToast(message) {
   toastEl.textContent = message;
@@ -752,6 +911,9 @@ async function loadBootstrap() {
   setTheme(resolvedTheme, false);
   setRunning(Boolean(data.is_running));
   renderMessages();
+  loadWorkspaceTree();
+  refreshSessionTabs();
+  updateContextPreview();
   await loadModels();
   if (resolvedTheme !== data.theme) {
     await fetch('/api/theme', {
@@ -859,6 +1021,7 @@ async function saveWorkspace() {
     recent_folders: data.recent_folders || [],
   };
   renderSettingsState();
+  loadWorkspaceTree();
   showToast(t('workspaceSaveOk'));
 }
 
@@ -920,6 +1083,11 @@ async function pollTask(taskId) {
         state.taskPlaceholderId = null;
         setRunning(false);
         renderMessages();
+        // Check for file changes, plan status, and tabs after task completes
+        setTimeout(loadChanges, 300);
+        setTimeout(pollPlanStatus, 500);
+        setTimeout(refreshSessionTabs, 700);
+        setTimeout(updateContextPreview, 900);
         return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 700));
@@ -994,13 +1162,626 @@ async function stopTask() {
   showToast(t('stopSent'));
 }
 
+async function loadChanges() {
+  try {
+    const res = await fetch('/api/changes');
+    const data = await res.json();
+    const changes = data.changes || [];
+    const panel = document.getElementById('changes-panel');
+    const list = document.getElementById('changes-list');
+
+    if (!changes.length) {
+      panel.hidden = true;
+      return;
+    }
+
+    panel.hidden = false;
+    list.innerHTML = changes.map((c) => `
+      <div class="change-item">
+        <span class="change-item__path" title="${escapeHtml(c.path)}">${escapeHtml(c.basename)}</span>
+        <span class="change-item__time">${escapeHtml(c.backup_time)}</span>
+        <button class="change-item__btn" data-diff-path="${escapeHtml(c.path)}">Diff</button>
+        <button class="change-item__btn change-item__btn--revert" data-revert-path="${escapeHtml(c.path)}">Revert</button>
+      </div>
+    `).join('');
+
+    // Wire up diff buttons
+    list.querySelectorAll('[data-diff-path]').forEach((btn) => {
+      btn.addEventListener('click', () => showDiff(btn.dataset.diffPath));
+    });
+
+    // Wire up revert buttons
+    list.querySelectorAll('[data-revert-path]').forEach((btn) => {
+      btn.addEventListener('click', () => revertFile(btn.dataset.revertPath));
+    });
+  } catch (error) {
+    // silently fail for changes polling
+  }
+}
+
+async function showDiff(filePath) {
+  const diffView = document.getElementById('diff-view');
+  diffView.hidden = false;
+  diffView.innerHTML = '<div class="diff-line diff-line--info">Loading diff...</div>';
+
+  try {
+    const res = await fetch('/api/diff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      diffView.innerHTML = `<div class="diff-line diff-line--remove">Error: ${escapeHtml(data.error)}</div>`;
+      return;
+    }
+    if (!data.has_changes) {
+      diffView.innerHTML = `<div class="diff-line diff-line--info">No changes (backup and current file are identical).</div>`;
+      return;
+    }
+
+    const lines = (data.diff || '').split('\n');
+    diffView.innerHTML = `
+      <div class="diff-view__header">
+        <span style="color:var(--text-0);font-weight:700;font-size:12px">${escapeHtml(filePath)}</span>
+        <button class="changes-panel__btn" id="close-diff-button">Close</button>
+      </div>
+    ` + lines.map((line) => {
+      let cls = 'diff-line';
+      if (line.startsWith('+++') || line.startsWith('---')) cls += ' diff-line--header';
+      else if (line.startsWith('+')) cls += ' diff-line--add';
+      else if (line.startsWith('-')) cls += ' diff-line--remove';
+      else if (line.startsWith('@@')) cls += ' diff-line--info';
+      return `<div class="${cls}">${escapeHtml(line)}</div>`;
+    }).join('');
+
+    document.getElementById('close-diff-button').addEventListener('click', () => {
+      diffView.hidden = true;
+    });
+
+    diffView.scrollTop = 0;
+  } catch (error) {
+    diffView.innerHTML = `<div class="diff-line diff-line--remove">Failed to load diff: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function revertFile(filePath) {
+  if (!confirm(`Revert ${filePath} to its previous version?`)) return;
+
+  try {
+    const res = await fetch('/api/revert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(`Reverted: ${filePath}`);
+      // Hide diff view and refresh
+      document.getElementById('diff-view').hidden = true;
+      loadChanges();
+    } else {
+      showToast(`Revert failed: ${data.error || data.msg}`);
+    }
+  } catch (error) {
+    showToast(`Revert error: ${error.message}`);
+  }
+}
+
+// ── Command palette ──────────────────────────────────────
+const COMMANDS = [
+  { id: 'new', label: 'New Chat', desc: 'Start fresh conversation', shortcut: '⌘⇧N', action: () => sendPrompt('/new') },
+  { id: 'sessions', label: 'Recover Session', desc: 'Continue previous conversation', shortcut: '', action: async () => { await loadSessions(); sessionsDialog.showModal(); } },
+  { id: 'plan', label: 'Plan Mode', desc: 'Enter plan-driven development', shortcut: '', action: () => { composerEl.value = '/plan '; composerEl.focus(); } },
+  { id: 'stop', label: 'Stop Generation', desc: 'Abort current task', shortcut: '⌘⇧S', action: stopTask },
+  { id: 'settings', label: 'Settings', desc: 'Model, workspace, remote config', shortcut: '', action: async () => { await loadSettings(); settingsDialog.showModal(); } },
+  { id: 'export', label: 'Export Conversation', desc: 'Download as markdown', shortcut: '', action: exportConversation },
+  { id: 'changes', label: 'Show File Changes', desc: 'View diff of agent edits', shortcut: '', action: () => { document.getElementById('changes-panel').hidden = false; loadChanges(); } },
+  { id: 'tree', label: 'Refresh Workspace Tree', desc: 'Reload file tree', shortcut: '', action: loadWorkspaceTree },
+  { id: 'composer', label: 'Focus Composer', desc: 'Jump to input', shortcut: '⌘K', action: () => composerEl.focus() },
+];
+
+function openCommandPalette() {
+  const palette = document.getElementById('command-palette');
+  const search = document.getElementById('command-search');
+  const list = document.getElementById('command-list');
+  let selected = 0;
+
+  function render(filter = '') {
+    const q = filter.toLowerCase();
+    const items = COMMANDS.filter((c) =>
+      !q || c.label.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q) || c.id.includes(q)
+    );
+    selected = Math.min(selected, items.length - 1);
+    list.innerHTML = items.length
+      ? items.map((c, i) => `
+        <div class="command-item${i === selected ? ' is-selected' : ''}" data-id="${c.id}">
+          ${c.shortcut ? `<span class="command-item__shortcut">${c.shortcut}</span>` : '<span class="command-item__shortcut"></span>'}
+          <span class="command-item__label">${c.label}</span>
+          <span class="command-item__desc">${c.desc}</span>
+        </div>
+      `).join('')
+      : '<div class="command-empty">No matching commands</div>';
+
+    list.querySelectorAll('.command-item').forEach((el, i) => {
+      el.addEventListener('click', () => {
+        const cmd = COMMANDS.find((c) => c.id === el.dataset.id);
+        if (cmd) { palette.close(); cmd.action(); }
+      });
+    });
+  }
+
+  render();
+  search.value = '';
+  search.focus();
+  palette.showModal();
+
+  const closeHandler = () => {
+    palette.removeEventListener('close', closeHandler);
+    search.removeEventListener('input', inputHandler);
+  };
+
+  const inputHandler = () => {
+    selected = 0;
+    render(search.value);
+  };
+
+  search.addEventListener('input', inputHandler);
+
+  search.addEventListener('keydown', (e) => {
+    const items = list.querySelectorAll('.command-item');
+    if (e.key === 'Escape') { palette.close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); selected = Math.min(selected + 1, items.length - 1); render(search.value); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); selected = Math.max(selected - 1, 0); render(search.value); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const cmd = COMMANDS.find((c) => c.id === items[selected]?.dataset?.id);
+      if (cmd) { palette.close(); cmd.action(); }
+    }
+  });
+
+  palette.addEventListener('close', closeHandler);
+}
+
+// ── Keyboard shortcuts ──────────────────────────────────
+document.addEventListener('keydown', (event) => {
+  const mod = event.metaKey || event.ctrlKey;
+  const key = event.key.toLowerCase();
+
+  // Cmd/Ctrl+Enter → send
+  if (mod && key === 'enter' && document.activeElement === composerEl) {
+    event.preventDefault();
+    sendPrompt(composerEl.value);
+    return;
+  }
+
+  // Cmd/Ctrl+Shift+N → new chat
+  if (mod && event.shiftKey && key === 'n') {
+    event.preventDefault();
+    sendPrompt('/new');
+    return;
+  }
+
+  // Cmd/Ctrl+Shift+S → stop
+  if (mod && event.shiftKey && key === 's') {
+    event.preventDefault();
+    stopTask();
+    return;
+  }
+
+  // Escape → close dialogs
+  if (key === 'escape') {
+    if (sessionsDialog.open) { sessionsDialog.close(); return; }
+    if (settingsDialog.open) { settingsDialog.close(); return; }
+    // Close diff view if open
+    const diffView = document.getElementById('diff-view');
+    if (diffView && !diffView.hidden) { diffView.hidden = true; return; }
+  }
+
+  // Cmd/Ctrl+K → command palette (or focus composer if already in it)
+  if (mod && key === 'k') {
+    if (document.activeElement === composerEl) {
+      return; // let default behavior (or use for @mention)
+    }
+    event.preventDefault();
+    openCommandPalette();
+    return;
+  }
+});
+
+// ── Agent context preview ────────────────────────────────
+function updateContextPreview() {
+  const modeEl = document.getElementById('ctx-mode');
+  const targetEl = document.getElementById('ctx-target');
+  const modelEl = document.getElementById('ctx-model');
+  const turnsEl = document.getElementById('ctx-turns');
+
+  const remote = state.remote;
+  const ws = state.workspace;
+
+  if (remote.connected && remote.form?.server_name) {
+    modeEl.textContent = 'Remote SSH';
+    targetEl.textContent = remote.form.server_name;
+  } else if (ws.active?.path) {
+    modeEl.textContent = 'Local Workspace';
+    targetEl.textContent = ws.active.name || ws.active.path.split('/').pop();
+  } else {
+    modeEl.textContent = 'Local (temp)';
+    targetEl.textContent = 'None';
+  }
+
+  modelEl.textContent = modelLabel.textContent || 'Not configured';
+  turnsEl.textContent = state.isRunning ? 'Running...' : '70 max';
+}
+
+// Update context after bootstrap and settings changes
+const _origHydrate = hydrateSettings;
+hydrateSettings = function(data) {
+  _origHydrate(data);
+  setTimeout(updateContextPreview, 200);
+};
+
+// ── Workspace file tree ──────────────────────────────────
+async function loadWorkspaceTree() {
+  const container = document.getElementById('workspace-tree');
+  try {
+    const res = await fetch('/api/workspace/tree');
+    const data = await res.json();
+    if (data.error || !data.tree?.length) {
+      container.innerHTML = `<div class="tree-empty">${escapeHtml(data.error || 'No workspace open')}</div>`;
+      return;
+    }
+
+    const entries = data.tree;
+    // Deduplicate: show only unique paths
+    const seen = new Set();
+    const rows = entries.filter((e) => {
+      if (seen.has(e.path)) return false;
+      seen.add(e.path);
+      return true;
+    });
+
+    container.innerHTML = rows.map((e) => {
+      const indent = '&nbsp;&nbsp;'.repeat(Math.max(0, e.depth));
+      const icon = e.type === 'dir' ? '▸' : '';
+      const cls = e.type === 'dir' ? 'tree-entry tree-entry--dir' : 'tree-entry tree-entry--file';
+      return `<div class="${cls}" data-path="${escapeHtml(e.path)}" data-type="${e.type}" title="${escapeHtml(e.path)}">
+        <span class="tree-icon">${icon}</span>
+        <span class="tree-name">${indent}${escapeHtml(e.name)}</span>
+      </div>`;
+    }).join('');
+
+    // Click handler: clicking a file copies path to composer
+    container.querySelectorAll('.tree-entry--file').forEach((el) => {
+      el.addEventListener('click', () => {
+        const path = el.dataset.path;
+        if (path) {
+          composerEl.value = `Read and analyze: ${path}`;
+          composerEl.focus();
+        }
+      });
+    });
+  } catch (error) {
+    container.innerHTML = '<div class="tree-empty">Failed to load tree</div>';
+  }
+}
+
+// Load tree on bootstrap and after workspace changes
+document.getElementById('refresh-tree-button').addEventListener('click', loadWorkspaceTree);
+
+// ── Plan mode ────────────────────────────────────────────
+async function pollPlanStatus() {
+  try {
+    const res = await fetch('/api/plan/status');
+    const data = await res.json();
+    const progress = document.getElementById('plan-progress');
+    if (data.in_plan) {
+      progress.hidden = false;
+      const remaining = Math.max(0, data.remaining);
+      const pct = remaining >= 0 ? Math.max(5, Math.round((1 - remaining / Math.max(remaining + 3, 10)) * 100)) : 50;
+      document.getElementById('plan-fill').style.width = `${pct}%`;
+      document.getElementById('plan-text').textContent = remaining === 0 ? 'Plan: Complete ✅' : `Plan: ${remaining} tasks left`;
+    } else {
+      progress.hidden = true;
+    }
+  } catch (e) {
+    // silently fail
+  }
+}
+
+document.getElementById('plan-button').addEventListener('click', () => {
+  composerEl.value = '/plan ';
+  composerEl.focus();
+});
+
+// ── Image paste / drop ───────────────────────────────────
+async function uploadImage(dataUrl) {
+  try {
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: dataUrl }),
+    });
+    const data = await res.json();
+    if (data.path) {
+      return data.path;
+    }
+    throw new Error(data.error || 'Upload failed');
+  } catch (e) {
+    showToast(`Image upload failed: ${e.message}`);
+    return null;
+  }
+}
+
+async function handleImagePaste(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
+composerEl.addEventListener('paste', async (event) => {
+  const items = event.clipboardData?.items;
+  if (!items) return;
+
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      event.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+
+      // Show upload indicator
+      const origPlaceholder = composerEl.placeholder;
+      composerEl.placeholder = 'Uploading image...';
+      composerEl.style.opacity = '0.6';
+
+      const dataUrl = await handleImagePaste(file);
+      if (dataUrl) {
+        const path = await uploadImage(dataUrl);
+        if (path) {
+          const before = composerEl.value;
+          composerEl.value = before + (before ? '\n' : '') + `@image:${path}`;
+        }
+      }
+
+      composerEl.placeholder = origPlaceholder;
+      composerEl.style.opacity = '';
+      composerEl.focus();
+    }
+  }
+});
+
+composerEl.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+
+composerEl.addEventListener('drop', async (event) => {
+  const files = event.dataTransfer?.files;
+  if (!files) return;
+  event.preventDefault();
+
+  for (const file of files) {
+    if (file.type.startsWith('image/')) {
+      const dataUrl = await handleImagePaste(file);
+      if (dataUrl) {
+        const path = await uploadImage(dataUrl);
+        if (path) {
+          const before = composerEl.value;
+          composerEl.value = before + (before ? '\n' : '') + `@image:${path}`;
+        }
+      }
+    }
+  }
+});
+
+// ── Session tabs ─────────────────────────────────────────
+async function refreshSessionTabs() {
+  const tabsEl = document.getElementById('session-tabs');
+  try {
+    const res = await fetch('/api/sessions');
+    const data = await res.json();
+    const sessions = data.sessions || [];
+
+    tabsEl.innerHTML = `
+      <span class="session-tab is-active" data-session="current">Chat</span>
+    ` + sessions.slice(0, 8).map((s, i) => `
+      <span class="session-tab" data-session="${s.index}" title="${escapeHtml(s.preview || '')}">
+        #${s.index}
+        <span class="session-tab__close" data-close="${s.index}">×</span>
+      </span>
+    `).join('');
+
+    // Click handler for switching
+    tabsEl.querySelectorAll('.session-tab').forEach((tab) => {
+      tab.addEventListener('click', async (e) => {
+        if (e.target.dataset.close) return; // handled by close handler
+        const sessionIdx = tab.dataset.session;
+        if (sessionIdx === 'current') return;
+        if (state.isRunning) {
+          showToast('Stop the current task first');
+          return;
+        }
+        await sendPrompt(`/continue ${sessionIdx}`);
+      });
+    });
+
+    // Close button handler
+    tabsEl.querySelectorAll('.session-tab__close').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        btn.parentElement.remove();
+      });
+    });
+  } catch (e) {
+    // silently fail
+  }
+}
+
+// Refresh tabs on load and after task completion
+// (Added to pollTask completion via setTimeout)
+
+// ── Conversation export ──────────────────────────────────
+function exportConversation() {
+  const lines = [];
+  lines.push(`# Generic Coder Conversation`);
+  lines.push(`\nExported: ${new Date().toISOString()}\n`);
+  state.messages.forEach((msg) => {
+    const role = msg.role === 'user' ? 'You' : 'Generic Coder';
+    lines.push(`### ${role}\n`);
+    // Strip thinking blocks for cleaner export
+    const content = (msg.content || '').replace(/<thinking>[\s\S]*?<\/thinking>/g, '[thinking omitted]');
+    lines.push(content + '\n');
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `generic-coder-export-${new Date().toISOString().slice(0, 10)}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Conversation exported as markdown');
+}
+
+document.getElementById('session-button').addEventListener('click', async (event) => {
+  // Shift+click on sessions button = export
+  if (event.shiftKey) {
+    event.preventDefault();
+    exportConversation();
+    return;
+  }
+  await loadSessions();
+  sessionsDialog.showModal();
+});
+
+// ── Changes panel toggle ────────────────────────────────
+document.getElementById('refresh-changes-button').addEventListener('click', loadChanges);
+document.getElementById('toggle-changes-button').addEventListener('click', () => {
+  const panel = document.getElementById('changes-panel');
+  const list = document.getElementById('changes-list');
+  const diffView = document.getElementById('diff-view');
+  const toggleBtn = document.getElementById('toggle-changes-button');
+  const isHidden = list.style.display === 'none';
+  list.style.display = isHidden ? '' : 'none';
+  diffView.hidden = isHidden ? diffView.hidden : true;
+  toggleBtn.textContent = isHidden ? 'Hide' : 'Show';
+});
+
 composerForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   await sendPrompt(composerEl.value);
 });
 
+// ── @‑mention file auto-complete ────────────────────────
+let mentionState = { active: false, query: '', items: [], selected: -1, startPos: 0 };
+const mentionDropdown = document.createElement('div');
+mentionDropdown.className = 'mention-dropdown';
+composerEl.parentNode.appendChild(mentionDropdown);
+
+async function fetchMentionSuggestions(query) {
+  try {
+    const res = await fetch(`/api/workspace/files?q=${encodeURIComponent(query)}&limit=10`);
+    const data = await res.json();
+    return data.files || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function renderMentionDropdown() {
+  if (!mentionState.active || !mentionState.items.length) {
+    mentionDropdown.classList.remove('is-active');
+    return;
+  }
+  mentionDropdown.classList.add('is-active');
+  mentionDropdown.innerHTML = mentionState.items.map((f, idx) => {
+    const icon = '📄';
+    const selClass = idx === mentionState.selected ? ' is-selected' : '';
+    return `<div class="mention-item${selClass}" data-idx="${idx}">
+      <span class="mention-item__icon">${icon}</span>
+      <span class="mention-item__name">${escapeHtml(f.name)}</span>
+      <span class="mention-item__path">${escapeHtml(f.rel)}</span>
+    </div>`;
+  });
+
+  // Click handlers
+  mentionDropdown.querySelectorAll('.mention-item').forEach((el) => {
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const idx = parseInt(el.dataset.idx);
+      insertMention(mentionState.items[idx]);
+    });
+  });
+}
+
+function insertMention(file) {
+  const before = composerEl.value.slice(0, mentionState.startPos);
+  const after = composerEl.value.slice(composerEl.selectionStart);
+  const mention = file.rel || file.name;
+  composerEl.value = before + mention + ' ' + after;
+  composerEl.focus();
+  const cursorPos = before.length + mention.length + 1;
+  composerEl.setSelectionRange(cursorPos, cursorPos);
+  mentionState.active = false;
+  mentionDropdown.classList.remove('is-active');
+}
+
+function detectMentionTrigger() {
+  const pos = composerEl.selectionStart;
+  const text = composerEl.value.slice(0, pos);
+  const atIdx = text.lastIndexOf('@');
+  if (atIdx === -1 || (atIdx > 0 && text[atIdx - 1] !== ' ' && text[atIdx - 1] !== '\n')) {
+    mentionState.active = false;
+    mentionDropdown.classList.remove('is-active');
+    return;
+  }
+  mentionState.active = true;
+  mentionState.startPos = atIdx;
+  mentionState.query = text.slice(atIdx + 1);
+  mentionState.selected = 0;
+  fetchMentionSuggestions(mentionState.query).then((items) => {
+    mentionState.items = items;
+    renderMentionDropdown();
+  });
+}
+
+composerEl.addEventListener('input', detectMentionTrigger);
+
+// Merged keydown: @mention navigation + Enter to send
 composerEl.addEventListener('keydown', async (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  // Handle @mention keyboard navigation
+  if (mentionState.active && mentionDropdown.classList.contains('is-active')) {
+    if (event.key === 'Escape') {
+      mentionState.active = false;
+      mentionDropdown.classList.remove('is-active');
+      event.preventDefault();
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      mentionState.selected = Math.min(mentionState.selected + 1, mentionState.items.length - 1);
+      renderMentionDropdown();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      mentionState.selected = Math.max(mentionState.selected - 1, 0);
+      renderMentionDropdown();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      if (mentionState.items[mentionState.selected]) {
+        insertMention(mentionState.items[mentionState.selected]);
+        event.preventDefault();
+        return;
+      }
+    }
+  }
+
+  // Enter to send (without shift)
+  if (event.key === 'Enter' && !event.shiftKey && !(mentionState.active && mentionDropdown.classList.contains('is-active'))) {
     event.preventDefault();
     await sendPrompt(composerEl.value);
   }
