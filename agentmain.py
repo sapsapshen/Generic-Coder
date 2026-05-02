@@ -1,4 +1,4 @@
-import os, sys, threading, queue, time, json, re, random, locale
+import os, sys, threading, queue, time, json, re, random, locale, copy
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 elif hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
@@ -39,10 +39,15 @@ def get_system_prompt():
     prompt += get_global_memory()
     return prompt
 
+_SESSION_OVERRIDE_ATTRS = {
+    'reasoning_effort', 'thinking_type', 'thinking_budget_tokens',
+    'temperature', 'max_tokens', 'service_tier'
+}
+
 class GeneraticAgent:
     def __init__(self):
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.task_dir = None
         self.history = []
         self.task_queue = queue.Queue() 
@@ -51,56 +56,74 @@ class GeneraticAgent:
         self.handler = None; self.verbose = True
         self.load_llm_sessions()
 
+    def is_busy(self):
+        with self.lock:
+            return self.is_running
+
     def load_llm_sessions(self):
-        mykeys, changed = reload_mykeys()
-        if not changed and hasattr(self, 'llmclients'): return
-        try: oldhistory = self.llmclient.backend.history
-        except: oldhistory = None
-        llm_sessions = []
-        for k, cfg in mykeys.items():
-            if not any(x in k for x in ['api', 'config', 'cookie']): continue
-            try:
-                if 'native' in k and 'claude' in k: llm_sessions += [NativeToolClient(NativeClaudeSession(cfg=cfg))]
-                elif 'native' in k and 'oai' in k: llm_sessions += [NativeToolClient(NativeOAISession(cfg=cfg))]
-                elif 'claude' in k: llm_sessions += [ToolClient(ClaudeSession(cfg=cfg))]
-                elif 'oai' in k: llm_sessions += [ToolClient(LLMSession(cfg=cfg))]
-                elif 'mixin' in k: llm_sessions += [{'mixin_cfg': cfg}]
-            except: pass
-        for i, s in enumerate(llm_sessions):
-            if isinstance(s, dict) and 'mixin_cfg' in s:
+        with self.lock:
+            mykeys, changed = reload_mykeys()
+            if not changed and hasattr(self, 'llmclients'): return
+            try: oldhistory = copy.deepcopy(self.llmclient.backend.history)
+            except: oldhistory = None
+            llm_sessions = []
+            for k, cfg in mykeys.items():
+                if not any(x in k for x in ['api', 'config', 'cookie']): continue
                 try:
-                    mixin = MixinSession(llm_sessions, s['mixin_cfg'])
-                    if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): llm_sessions[i] = NativeToolClient(mixin)
-                    else: llm_sessions[i] = ToolClient(mixin)
-                except Exception as e: print(f'[WARN] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}')
-        self.llmclients = llm_sessions
-        self.llmclient = self.llmclients[self.llm_no%len(self.llmclients)]
-        if oldhistory: self.llmclient.backend.history = oldhistory
+                    if 'native' in k and 'claude' in k: llm_sessions += [NativeToolClient(NativeClaudeSession(cfg=cfg))]
+                    elif 'native' in k and 'oai' in k: llm_sessions += [NativeToolClient(NativeOAISession(cfg=cfg))]
+                    elif 'claude' in k: llm_sessions += [ToolClient(ClaudeSession(cfg=cfg))]
+                    elif 'oai' in k: llm_sessions += [ToolClient(LLMSession(cfg=cfg))]
+                    elif 'mixin' in k: llm_sessions += [{'mixin_cfg': cfg}]
+                except: pass
+            for i, s in enumerate(llm_sessions):
+                if isinstance(s, dict) and 'mixin_cfg' in s:
+                    try:
+                        mixin = MixinSession(llm_sessions, s['mixin_cfg'])
+                        if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): llm_sessions[i] = NativeToolClient(mixin)
+                        else: llm_sessions[i] = ToolClient(mixin)
+                    except Exception as e: print(f'[WARN] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}')
+            self.llmclients = llm_sessions
+            if not self.llmclients:
+                self.llmclient = None
+                self.llm_no = 0
+                return
+            self.llm_no %= len(self.llmclients)
+            self.llmclient = self.llmclients[self.llm_no]
+            if oldhistory: self.llmclient.backend.history = oldhistory
     
     def next_llm(self, n=-1):
-        self.load_llm_sessions()
-        self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
-        lastc = self.llmclient
-        self.llmclient = self.llmclients[self.llm_no]
-        try: self.llmclient.backend.history = lastc.backend.history
-        except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
-        self.llmclient.last_tools = ''
-        name = self.get_llm_name(model=True)
-        if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')
-        else: load_tool_schema()
+        with self.lock:
+            self.load_llm_sessions()
+            if not getattr(self, 'llmclients', None):
+                raise RuntimeError('[ERROR] No valid LLM session configured. Check mykey.py or UI settings.')
+            self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
+            lastc = self.llmclient
+            self.llmclient = self.llmclients[self.llm_no]
+            if lastc is not None:
+                try: self.llmclient.backend.history = copy.deepcopy(lastc.backend.history)
+                except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
+            self.llmclient.last_tools = ''
+            name = self.get_llm_name(model=True)
+            if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')
+            else: load_tool_schema()
     def list_llms(self): 
         self.load_llm_sessions()
-        return [(i, self.get_llm_name(b), i == self.llm_no) for i, b in enumerate(self.llmclients)]
+        with self.lock:
+            return [(i, self.get_llm_name(b), i == self.llm_no) for i, b in enumerate(getattr(self, 'llmclients', []))]
     def get_llm_name(self, b=None, model=False):
         b = self.llmclient if b is None else b
+        if b is None: return '' if model else 'NO_LLM_CONFIGURED'
         if isinstance(b, dict): return 'BADCONFIG_MIXIN'
         if model: return b.backend.model.lower()
         return f"{type(b.backend).__name__}/{b.backend.name}"
 
     def abort(self):
-        if not self.is_running: return
+        with self.lock:
+            if not self.is_running: return
         print('Abort current task...')
-        self.stop_sig = True
+        with self.lock:
+            self.stop_sig = True
         if self.handler is not None: self.handler.code_stop_signal.append(1)
             
     def put_task(self, query, source="user", images=None):
@@ -117,7 +140,15 @@ class GeneraticAgent:
             if os.path.isfile(vfile): v = open(vfile, encoding='utf-8').read().strip()
             try: v = json.loads(v)  # cover number parsing
             except (json.JSONDecodeError, ValueError): pass
-            setattr(self.llmclient.backend, k, v)
+            with self.lock:
+                if self.llmclient is None:
+                    display_queue.put({'done': '[ERROR] No valid LLM session configured.', 'source': 'system'})
+                    return None
+                if k not in _SESSION_OVERRIDE_ATTRS:
+                    allowed = ', '.join(sorted(_SESSION_OVERRIDE_ATTRS))
+                    display_queue.put({'done': f'[ERROR] session.{k} is not allowed. Allowed: {allowed}', 'source': 'system'})
+                    return None
+                setattr(self.llmclient.backend, k, v)
             display_queue.put({'done': smart_format(f"✅ session.{k} = {repr(v)}", max_str_len=500), 'source': 'system'})
             return None
         if raw_query.strip() == '/resume':
@@ -131,11 +162,19 @@ class GeneraticAgent:
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
-            self.is_running = True
+            with self.lock:
+                client = self.llmclient
+                if client is None:
+                    display_queue.put({'done': '[ERROR] No valid LLM session configured. Check mykey.py or UI model settings.', 'source': source})
+                    self.task_queue.task_done()
+                    continue
+                self.is_running = True
+                self.stop_sig = False
+                extra_sys_prompt = getattr(client.backend, 'extra_sys_prompt', '')
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             
-            sys_prompt = get_system_prompt() + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
+            sys_prompt = get_system_prompt() + extra_sys_prompt
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
             if self.handler and 'key_info' in self.handler.working: 
                 ki = re.sub(r'\n\[SYSTEM\] 此为.*?工作记忆[。\n]*', '', self.handler.working['key_info'])  # 去旧
@@ -144,7 +183,7 @@ class GeneraticAgent:
                 if ps > 0: handler.working['key_info'] += f'\n[SYSTEM] 此为 {ps} 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\n'
             self.handler = handler
             # although new handler, the **full** history is in llmclient, so it is full history!
-            gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query, 
+            gen = agent_runner_loop(client, sys_prompt, raw_query, 
                                 handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose)
             try:
                 full_resp = ""; last_pos = 0
@@ -167,7 +206,8 @@ class GeneraticAgent:
                 if self.stop_sig:
                     print('User aborted the task.')
                     #with self.task_queue.mutex: self.task_queue.queue.clear()
-                self.is_running = self.stop_sig = False
+                with self.lock:
+                    self.is_running = self.stop_sig = False
                 self.task_queue.task_done()
                 if self.handler is not None: self.handler.code_stop_signal.append(1)
 

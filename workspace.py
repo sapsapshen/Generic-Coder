@@ -409,14 +409,28 @@ class WorkspaceManager:
         except ValueError:
             return False
 
+    def _resolve_workspace_path(self, path: str, label: str, allow_missing: bool = True):
+        absolute_path = os.path.abspath(path)
+        active = self.get_active_workspace()
+        if active.get('status') != 'success':
+            return None, {'status': 'error', 'msg': 'No active workspace'}
+        if not self.is_within_workspace(absolute_path):
+            return None, {'status': 'error', 'msg': f'{label} is outside the active workspace: {absolute_path}'}
+        if not allow_missing and not os.path.exists(absolute_path):
+            return None, {'status': 'error', 'msg': f'{label} not found: {absolute_path}'}
+        return absolute_path, None
+
     def create_folder(self, path: str) -> dict:
-        os.makedirs(os.path.abspath(path), exist_ok=True)
-        return {'status': 'success', 'path': os.path.abspath(path)}
+        path, err = self._resolve_workspace_path(path, 'Path')
+        if err:
+            return err
+        os.makedirs(path, exist_ok=True)
+        return {'status': 'success', 'path': path}
 
     def delete_item(self, path: str) -> dict:
-        path = os.path.abspath(path)
-        if not os.path.exists(path):
-            return {'status': 'error', 'msg': f'Path not found: {path}'}
+        path, err = self._resolve_workspace_path(path, 'Path', allow_missing=False)
+        if err:
+            return err
 
         try:
             if os.path.isdir(path):
@@ -429,10 +443,12 @@ class WorkspaceManager:
             return {'status': 'error', 'msg': str(e)}
 
     def move_item(self, src: str, dst: str) -> dict:
-        src = os.path.abspath(src)
-        dst = os.path.abspath(dst)
-        if not os.path.exists(src):
-            return {'status': 'error', 'msg': f'Source not found: {src}'}
+        src, err = self._resolve_workspace_path(src, 'Source', allow_missing=False)
+        if err:
+            return err
+        dst, err = self._resolve_workspace_path(dst, 'Destination')
+        if err:
+            return err
 
         try:
             os.makedirs(os.path.dirname(dst), exist_ok=True)

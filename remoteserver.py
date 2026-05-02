@@ -1,4 +1,4 @@
-import os, sys, json, time, threading, socket, hashlib
+import os, sys, json, time, threading, shlex
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Generator, Dict, List, Any
@@ -7,6 +7,9 @@ _CONFIG_DIR = Path.home() / '.genericagent'
 _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 _REMOTE_CONFIG_PATH = _CONFIG_DIR / 'remote_config.json'
 
+def _shell_quote(value: str) -> str:
+    return shlex.quote(value or '')
+
 @dataclass
 class ConnectionConfig:
     name: str
@@ -14,41 +17,15 @@ class ConnectionConfig:
     port: int = 22
     username: str = 'root'
     auth_type: str = 'password'
-    password_encrypted: str = ''
     key_path: str = ''
     jump_host: str = ''
     jump_port: int = 22
     jump_username: str = ''
-    jump_password_encrypted: str = ''
     jump_key_path: str = ''
     last_connected: float = 0.0
 
     def to_dict(self) -> dict:
-        d = self.__dict__.copy()
-        d.pop('password_encrypted', None)
-        d.pop('jump_password_encrypted', None)
-        return {k: v for k, v in d.items() if not k.endswith('_encrypted')}
-
-def _derive_key() -> bytes:
-    hostname = socket.gethostname()
-    key_material = f"genericagent_remote_{hostname}_salt_v1"
-    return hashlib.sha256(key_material.encode()).digest()
-
-def _simple_encrypt(data: str) -> str:
-    if not data:
-        return ''
-    from base64 import b64encode
-    key = _derive_key()
-    result = bytes(c ^ key[i % len(key)] for i, c in enumerate(data.encode()))
-    return b64encode(result).decode()
-
-def _simple_decrypt(encrypted: str) -> str:
-    if not encrypted:
-        return ''
-    from base64 import b64decode
-    key = _derive_key()
-    result = bytearray(b64decode(encrypted))
-    return bytes(c ^ key[i % len(key)] for i, c in enumerate(result)).decode()
+        return self.__dict__.copy()
 
 def load_remote_config() -> List[dict]:
     if _REMOTE_CONFIG_PATH.exists():
@@ -73,14 +50,12 @@ def add_server_config(name: str, host: str, port: int = 22, username: str = 'roo
             c['host'] = host
             c['port'] = port
             c['username'] = username
-            if password:
-                c['_pwd'] = _simple_encrypt(password)
             c['key_path'] = key_path
             c['jump_host'] = jump_host
             c['jump_port'] = jump_port
             c['jump_username'] = jump_username
-            if jump_password:
-                c['_jpwd'] = _simple_encrypt(jump_password)
+            c.pop('_pwd', None)
+            c.pop('_jpwd', None)
             save_remote_config(configs)
             return True
     entry = {
@@ -89,10 +64,6 @@ def add_server_config(name: str, host: str, port: int = 22, username: str = 'roo
         'jump_host': jump_host, 'jump_port': jump_port,
         'jump_username': jump_username,
     }
-    if password:
-        entry['_pwd'] = _simple_encrypt(password)
-    if jump_password:
-        entry['_jpwd'] = _simple_encrypt(jump_password)
     configs.append(entry)
     save_remote_config(configs)
     return True
@@ -137,16 +108,17 @@ class RemoteServerConnection:
                 'jump_port': jump_port, 'jump_username': jump_username,
             }
             if not _PARAMIKO_AVAILABLE:
+                if password and not key_path:
+                    return {'status': 'error', 'msg': 'Password auth in OpenSSH fallback mode is unsupported. Install remote extras (paramiko) or use key-based auth.'}
                 test_cmd = ['ssh', '-o', 'StrictHostKeyChecking=no',
-                           '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes']
+                            '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes']
                 if port != 22:
                     test_cmd += ['-p', str(port)]
                 if key_path:
                     test_cmd += ['-i', key_path]
                 test_cmd += [f'{username}@{host}', 'echo', 'OK']
                 try:
-                    result = _sp.run(test_cmd, capture_output=True, text=True, timeout=10,
-                                    env={**os.environ, 'SSHPASS': password} if password else None)
+                    result = _sp.run(test_cmd, capture_output=True, text=True, timeout=10)
                     if result.returncode == 0 and 'OK' in result.stdout:
                         self._connected = True
                         return {'status': 'connected', 'host': host, 'method': 'openssh_cli'}
@@ -249,7 +221,7 @@ class RemoteServerConnection:
 
         full_cmd = command
         if cwd:
-            full_cmd = f'cd "{cwd}" && {command}'
+            full_cmd = f'cd {_shell_quote(cwd)} && {command}'
 
         if not _PARAMIKO_AVAILABLE:
             host = self._config['host']
@@ -336,7 +308,7 @@ class RemoteServerConnection:
                 ssh_cmd += ['-p', str(port)]
             if key_path:
                 ssh_cmd += ['-i', key_path]
-            ssh_cmd += [f'{username}@{host}', 'cat', f'"{path}"']
+            ssh_cmd += [f'{username}@{host}', 'cat', _shell_quote(path)]
             try:
                 result = _sp.run(ssh_cmd, capture_output=True, text=True, timeout=30)
                 if result.returncode != 0:
@@ -391,7 +363,7 @@ class RemoteServerConnection:
                 try:
                     self._sftp.stat(dir_path)
                 except FileNotFoundError:
-                    self.exec_command_sync(f'mkdir -p "{dir_path}"')
+                    self.exec_command_sync(f'mkdir -p {_shell_quote(dir_path)}')
 
             with self._sftp.open(path, 'w') as f:
                 f.write(content)
@@ -413,7 +385,7 @@ class RemoteServerConnection:
                 ssh_cmd += ['-p', str(port)]
             if key_path:
                 ssh_cmd += ['-i', key_path]
-            ssh_cmd += [f'{username}@{host}', 'ls', '-la', '--time-style=+%s', f'"{path}"']
+            ssh_cmd += [f'{username}@{host}', 'ls', '-la', '--time-style=+%s', _shell_quote(path)]
             try:
                 result = _sp.run(ssh_cmd, capture_output=True, text=True, timeout=15)
                 items = []
@@ -450,7 +422,7 @@ class RemoteServerConnection:
             return {'status': 'error', 'msg': 'Not connected'}
 
         if not _PARAMIKO_AVAILABLE:
-            return self.exec_command_sync(f'rm -rf "{path}"')
+            return self.exec_command_sync(f'rm -rf {_shell_quote(path)}')
 
         try:
             try:
@@ -481,7 +453,7 @@ class RemoteServerConnection:
                 ssh_cmd += ['-p', str(port)]
             if key_path:
                 ssh_cmd += ['-i', key_path]
-            ssh_cmd += [f'{username}@{host}', 'stat', '--format=%F|%s|%Y|%a', f'"{path}"']
+            ssh_cmd += [f'{username}@{host}', 'stat', '--format=%F|%s|%Y|%a', _shell_quote(path)]
             try:
                 result = _sp.run(ssh_cmd, capture_output=True, text=True, timeout=10)
                 if result.returncode != 0:
@@ -542,7 +514,7 @@ class RemoteServerConnection:
                 try:
                     self._sftp.stat(dir_path)
                 except FileNotFoundError:
-                    self.exec_command_sync(f'mkdir -p "{dir_path}"')
+                    self.exec_command_sync(f'mkdir -p {_shell_quote(dir_path)}')
 
             total_size = os.path.getsize(local_path)
             transferred = [0]
@@ -594,10 +566,11 @@ class RemoteServerConnection:
 
     def exec_command_sync(self, command: str, timeout: int = 60, cwd: str = '') -> dict:
         gen = self.exec_command(command, timeout=timeout, cwd=cwd)
-        result = None
-        for _ in gen:
-            pass
-        return result or {'status': 'error', 'msg': 'Unknown error'}
+        try:
+            while True:
+                next(gen)
+        except StopIteration as stop:
+            return stop.value or {'status': 'error', 'msg': 'Unknown error'}
 
     def _rmtree_sftp(self, path: str):
         for item in self._sftp.listdir_attr(path):
@@ -630,29 +603,15 @@ class RemoteServerManager:
         if not config:
             return {'status': 'error', 'msg': f'Server config "{name}" not found'}
 
-        pwd = password
-        if not pwd and config.get('_pwd'):
-            try:
-                pwd = _simple_decrypt(config['_pwd'])
-            except Exception:
-                pass
-
-        jump_pwd = ''
-        if config.get('_jpwd'):
-            try:
-                jump_pwd = _simple_decrypt(config['_jpwd'])
-            except Exception:
-                pass
-
         conn = RemoteServerConnection()
         result = conn.connect(
             host=config['host'], port=config.get('port', 22),
-            username=config.get('username', 'root'), password=pwd,
+            username=config.get('username', 'root'), password=password,
             key_path=config.get('key_path', ''),
             jump_host=config.get('jump_host', ''),
             jump_port=config.get('jump_port', 22),
             jump_username=config.get('jump_username', ''),
-            jump_password=jump_pwd)
+            jump_password='')
 
         if result.get('status') == 'connected':
             self.connections[name] = conn

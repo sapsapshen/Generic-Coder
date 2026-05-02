@@ -1,4 +1,4 @@
-import sys, os, re, json, time, threading, importlib
+import sys, os, re, json, time, threading, importlib, ast
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib
@@ -494,6 +494,62 @@ class GenericAgentHandler(BaseHandler):
         matches = re.findall(rf"```(?:{code_type})\n(.*?)\n```", response.content, re.DOTALL)
         return matches[-1].strip() if matches else None
 
+    def _inline_attr_path(self, node):
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+            return tuple(reversed(parts))
+        return None
+
+    def _inline_resolve(self, node, ns):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.List):
+            return [self._inline_resolve(i, ns) for i in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(self._inline_resolve(i, ns) for i in node.elts)
+        if isinstance(node, ast.Dict):
+            return {self._inline_resolve(k, ns): self._inline_resolve(v, ns) for k, v in zip(node.keys, node.values)}
+        if isinstance(node, ast.Name) and node.id in ns:
+            return ns[node.id]
+        if isinstance(node, ast.Attribute):
+            path = self._inline_attr_path(node)
+            if path == ('handler',):
+                return ns['handler']
+            if path == ('parent',):
+                return ns['parent']
+            if path == ('handler', '_done_hooks'):
+                return ns['handler']._done_hooks
+            raise ValueError(f'inline_eval attribute not allowed: {".".join(path or ["<unknown>"])}')
+        if isinstance(node, ast.Call):
+            if node.keywords:
+                raise ValueError('inline_eval does not support keyword arguments')
+            path = self._inline_attr_path(node.func)
+            args = [self._inline_resolve(arg, ns) for arg in node.args]
+            if path == ('handler', 'enter_plan_mode') and len(args) == 1:
+                return ns['handler'].enter_plan_mode(args[0])
+            if path == ('handler', '_done_hooks', 'append') and len(args) == 1:
+                return ns['handler']._done_hooks.append(args[0])
+            raise ValueError(f'inline_eval call not allowed: {".".join(path or ["<unknown>"])}')
+        raise ValueError(f'inline_eval syntax not allowed: {type(node).__name__}')
+
+    def _run_inline_eval(self, code, ns):
+        tree = ast.parse(code, mode='exec')
+        result = 'OK'
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Expr):
+                value = self._inline_resolve(stmt.value, ns)
+                result = 'OK' if value is None else repr(value)
+            elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id == '_r':
+                ns['_r'] = self._inline_resolve(stmt.value, ns)
+                result = ns['_r']
+            else:
+                raise ValueError(f'inline_eval statement not allowed: {type(stmt).__name__}')
+        return result if isinstance(result, str) else repr(result)
+
     def do_code_run(self, args, response):
         '''执行代码片段，有长度限制，不允许代码中放大量数据，如有需要应当通过文件读取进行。'''
         code_type = args.get("type", "python")
@@ -510,9 +566,7 @@ class GenericAgentHandler(BaseHandler):
             old_cwd = os.getcwd()
             try:
                 os.chdir(cwd)
-                try:
-                    try: result = repr(eval(code, ns))
-                    except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
+                try: result = self._run_inline_eval(code, ns)
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
         else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
@@ -611,8 +665,11 @@ class GenericAgentHandler(BaseHandler):
         try:
             new_content = expand_file_refs(blocks, base_dir=self.cwd)
             if mode == "prepend":
-                old = open(path, 'r', encoding="utf-8").read() if os.path.exists(path) else ""
-                open(path, 'w', encoding="utf-8").write(new_content + old)
+                try:
+                    with open(path, 'r', encoding="utf-8") as f: old = f.read()
+                except FileNotFoundError:
+                    old = ""
+                with open(path, 'w', encoding="utf-8") as f: f.write(new_content + old)
             else:
                 with open(path, 'a' if mode == "append" else 'w', encoding="utf-8") as f: f.write(new_content)
             yield f"[Status] ✅ {mode.capitalize()} 成功 ({len(new_content)} bytes)\n"

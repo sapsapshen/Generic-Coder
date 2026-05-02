@@ -215,7 +215,10 @@ class GenericCoderState:
             }
 
     def _save_frontend_state(self) -> None:
-        save_json(FRONTEND_STATE_PATH, self.frontend_state)
+        payload = json.loads(json.dumps(self.frontend_state, ensure_ascii=False))
+        if isinstance(payload.get("remote"), dict):
+            payload["remote"]["password"] = ""
+        save_json(FRONTEND_STATE_PATH, payload)
 
     def llm_form_payload(self) -> Dict[str, str]:
         return load_managed_llm_form()
@@ -252,6 +255,7 @@ class GenericCoderState:
     def remote_payload(self) -> Dict[str, Any]:
         remote_state = dict(default_frontend_state()["remote"])
         remote_state.update(self.frontend_state.get("remote", {}))
+        remote_state["password"] = ""
         active_connections = self.remote_manager.list_active_connections()
         return {
             "form": remote_state,
@@ -368,7 +372,7 @@ class GenericCoderState:
     def set_model(self, index: int) -> Dict[str, object]:
         self.agent.load_llm_sessions()
         clients = getattr(self.agent, "llmclients", []) or []
-        if getattr(self.agent, "is_running", False):
+        if self.agent.is_busy():
             raise RuntimeError("Cannot switch model while a task is running.")
         if not (0 <= index < len(clients)):
             raise IndexError(f"Model index out of range: {index}")
@@ -484,12 +488,15 @@ class GenericCoderState:
             task = self.pending.get(task_id)
             if task is None:
                 return {"done": True, "preview": "...", "final": "..."}
-            return {
+            payload = {
                 "done": bool(task["done"]),
                 "preview": str(task["preview"]),
                 "final": str(task["final"]),
                 "updated_at": task["updated_at"],
             }
+            if payload["done"]:
+                self.pending.pop(task_id, None)
+            return payload
 
     def list_sessions_payload(self) -> Dict[str, object]:
         sessions = list_sessions(exclude_pid=os.getpid())[:MAX_SESSIONS]
@@ -508,7 +515,7 @@ class GenericCoderState:
 
     def stop(self) -> Dict[str, object]:
         self.agent.abort()
-        return {"ok": True, "is_running": bool(getattr(self.agent, "is_running", False))}
+        return {"ok": True, "is_running": self.agent.is_busy()}
 
 
 STATE = GenericCoderState()
