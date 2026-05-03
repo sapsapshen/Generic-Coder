@@ -1,3 +1,5 @@
+Rust version：https://github.com/sapsapshen/Generic-Coder-Rust
+
 # Generic Coder
 
 <img width="5110" height="2330" alt="334250b4-d138-4c9e-86b8-c3e0cb3676a7" src="https://github.com/user-attachments/assets/770df563-bb44-4692-aadf-21fa5946d228" />
